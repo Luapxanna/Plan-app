@@ -9,12 +9,18 @@
     "test": "vitest"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.5",
     "@types/node": "^20.5.7",
+    "@types/pg": "^8.10.9",
     "typescript": "^5.2.2",
     "vitest": "^3.1.2"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "encore.dev": "^1.46.20",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.3",
     "ts-node": "^10.9.2"
   },
   "optionalDependencies": {
