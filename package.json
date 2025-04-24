@@ -17,6 +17,7 @@
     "vitest": "^3.1.2"
   },
   "dependencies": {
+    "@logto/node": "^3.1.4",
     "bcryptjs": "^2.4.3",
     "encore.dev": "^1.46.20",
     "jsonwebtoken": "^9.0.2",

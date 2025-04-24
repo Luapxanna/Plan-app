@@ -1,9 +1,9 @@
 import { api, APIError } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
-import { verifyToken, getCurrentToken } from "./auth";
+import { verifyToken } from "./auth";
 
-// 'url' database is used to store the plans
-const db = new SQLDatabase("url", { migrations: "./migrations" });
+// 'plan' database is used to store the plans
+const db = new SQLDatabase("plan", { migrations: "./migrations" });
 
 interface Workspace {
   id: string;
@@ -39,11 +39,10 @@ interface ListUsersResponse {
 
 // Helper function to verify token and set user context
 async function verifyAndSetUserContext(): Promise<void> {
-  const { token } = await getCurrentToken();
-  if (!token) {
+  const userId = await verifyToken();
+  if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  const userId = await verifyToken(token);
 
   // Set user context
   await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
@@ -69,11 +68,10 @@ async function verifyAndSetUserContext(): Promise<void> {
 
 // GetCurrentWorkspace returns the current workspace based on the workspace_id setting
 export async function getCurrentWorkspace(): Promise<Workspace> {
-  const { token } = await getCurrentToken();
-  if (!token) {
+  const userId = await verifyToken();
+  if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  const userId = await verifyToken(token);
   await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
 
   const workspaceId = await checkWorkspaceContext();
@@ -337,33 +335,6 @@ export const listWorkspaces = api(
   }
 );
 
-// Get current user with superuser status
-export const getCurrentUser = api(
-  { expose: true, method: "GET", path: "/user/current" },
-  async (): Promise<User> => {
-    await verifyAndSetUserContext();
-    const userId = await db.queryRow<{ user_id: string }>`
-      SELECT current_setting('app.user_id', true) as user_id
-    `;
-
-    if (!userId?.user_id) {
-      throw APIError.notFound("User not found");
-    }
-
-    const user = await db.queryRow<User>`
-      SELECT id, email, is_superuser
-      FROM users
-      WHERE id = ${userId.user_id}::uuid
-    `;
-
-    if (!user) {
-      throw APIError.notFound("User not found");
-    }
-
-    return user;
-  }
-);
-
 // Grant workspace access to a user
 export const grantWorkspaceAccess = api(
   { expose: true, method: "POST", path: "/workspace/:workspace_id/grant/:user_id" },
@@ -463,11 +434,10 @@ export const getWorkspaceUsers = api(
 );
 
 export async function createWorkspace(name: string): Promise<Workspace> {
-  const { token } = await getCurrentToken();
-  if (!token) {
+  const userId = await verifyToken();
+  if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  const userId = await verifyToken(token);
   await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
 
   const result = await db.queryRow<{ id: string }>`
@@ -493,11 +463,10 @@ export async function createWorkspace(name: string): Promise<Workspace> {
 }
 
 export async function updateWorkspace(workspaceId: string, name: string): Promise<Workspace> {
-  const { token } = await getCurrentToken();
-  if (!token) {
+  const userId = await verifyToken();
+  if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  const userId = await verifyToken(token);
   await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
 
   const workspace = await db.queryRow<Workspace>`
@@ -516,11 +485,10 @@ export async function updateWorkspace(workspaceId: string, name: string): Promis
 }
 
 export async function deleteWorkspace(workspaceId: string): Promise<void> {
-  const { token } = await getCurrentToken();
-  if (!token) {
+  const userId = await verifyToken();
+  if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  const userId = await verifyToken(token);
   await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
 
   const result = await db.queryRow<{ deleted: boolean }>`
@@ -539,11 +507,10 @@ export async function deleteWorkspace(workspaceId: string): Promise<void> {
 }
 
 export async function switchWorkspace(workspaceId: string): Promise<Workspace> {
-  const { token } = await getCurrentToken();
-  if (!token) {
+  const userId = await verifyToken();
+  if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  const userId = await verifyToken(token);
   await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
 
   const workspace = await db.queryRow<Workspace>`

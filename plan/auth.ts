@@ -1,56 +1,67 @@
 import { api, APIError } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcryptjs";
+import LogtoClient from '@logto/node';
+import { LogtoConfig } from '@logto/node';
+import { createHash } from 'crypto';
 
-const db = new SQLDatabase("url", { migrations: "./migrations" });
+const db = new SQLDatabase("plan", { migrations: "./migrations" });
 
-// Use a secure default secret in development
-const JWT_SECRET = process.env.JWT_SECRET || "development-secret-key-change-in-production";
-const SALT_ROUNDS = 10;
+// Logto configuration
+const logtoConfig: LogtoConfig = {
+    endpoint: process.env.LOGTO_ENDPOINT || 'https://gtkmrh.logto.app/',
+    appId: process.env.LOGTO_APP_ID || 'hcql8o16wg2gilpxaoek6',
+    appSecret: process.env.LOGTO_APP_SECRET || 'z1IzhncJbEbZqquCkRZAMCFUad1z36r5',
+    scopes: ['openid', 'profile', 'email'],
+    resources: ['https://api.example.com']
+};
 
-// Store the current token and blacklisted tokens in memory
-// In production, use a secure storage like Redis
-let currentToken: string | null = null;
-const blacklistedTokens = new Set<string>();
+const logtoClient = new LogtoClient(logtoConfig, {
+    navigate: (url: string) => {
+        // Handle navigation if needed
+    },
+    storage: {
+        getItem: async (key: string) => {
+            // Implement storage get
+            return null;
+        },
+        setItem: async (key: string, value: string) => {
+            // Implement storage set
+        },
+        removeItem: async (key: string) => {
+            // Implement storage remove
+        },
+    },
+});
 
 interface User {
     id: string;
     email: string;
-    password_hash: string;
-}
-
-interface LoginRequest {
-    email: string;
-    password: string;
-}
-
-interface RegisterRequest {
-    email: string;
-    password: string;
+    name?: string;
+    picture?: string;
+    is_superuser: boolean;
 }
 
 interface AuthResponse {
-    token: string;
-    user: {
-        id: string;
-        email: string;
-    };
+    user: User;
     workspace_id: string;
+}
+
+interface RedirectResponse {
+    redirect_url: string;
 }
 
 // Helper function to create a personal workspace for a user
 async function createPersonalWorkspace(userId: string, email: string): Promise<string> {
     const workspace = await db.queryRow<{ id: string }>`
-        WITH new_workspace AS (
-            INSERT INTO workspace (id, name)
-            VALUES (gen_random_uuid(), ${`${email}'s Workspace`})
-            RETURNING id
-        )
-        INSERT INTO user_workspaces (user_id, workspace_id)
-        SELECT ${userId}::uuid, id FROM new_workspace
-        RETURNING workspace_id
-    `;
+    WITH new_workspace AS (
+      INSERT INTO workspaces (name)
+      VALUES (${`${email}'s Workspace`})
+      RETURNING id
+    )
+    INSERT INTO user_workspaces (user_id, workspace_id)
+    SELECT ${userId}::uuid, id FROM new_workspace
+    RETURNING workspace_id
+  `;
 
     if (!workspace) {
         throw APIError.internal("Failed to create workspace");
@@ -59,161 +70,230 @@ async function createPersonalWorkspace(userId: string, email: string): Promise<s
     return workspace.id;
 }
 
-// Helper function to check if a token is blacklisted
-function isTokenBlacklisted(token: string): boolean {
-    return blacklistedTokens.has(token);
-}
+// Get user info from Logto and create/update user in our database
+export const handleLogtoCallback = api(
+    { expose: true, auth: false, method: "POST", path: "/auth/callback" },
+    async ({ code }: { code: string }): Promise<AuthResponse> => {
+        try {
+            // Exchange code for tokens
+            await logtoClient.handleSignInCallback(code);
 
-// Register a new user
-export const register = api(
-    { expose: true, auth: false, method: "POST", path: "/auth/register" },
-    async (req: RegisterRequest): Promise<AuthResponse> => {
-        const { email, password } = req;
+            // Get user info from Logto
+            const userInfo = await logtoClient.getIdTokenClaims();
 
-        // Check if user already exists
-        const existingUser = await db.queryRow<User>`
-      SELECT * FROM users WHERE email = ${email}
-    `;
+            if (!userInfo.sub || !userInfo.email) {
+                throw APIError.internal("Invalid user info from Logto");
+            }
 
-        if (existingUser) {
-            throw APIError.alreadyExists("User already exists");
+            // Check if user exists in our database
+            let user = await db.queryRow<User>`
+        SELECT * FROM users WHERE id = ${userInfo.sub}
+      `;
+
+            if (!user) {
+                // Create new user
+                user = await db.queryRow<User>`
+          INSERT INTO users (id, email, name, picture, is_superuser)
+          VALUES (
+            ${userInfo.sub},
+            ${userInfo.email},
+            ${userInfo.name || null},
+            ${userInfo.picture || null},
+            false
+          )
+          RETURNING id, email, name, picture, is_superuser
+        `;
+
+                if (!user) {
+                    throw APIError.internal("Failed to create user");
+                }
+
+                // Create personal workspace
+                const workspaceId = await createPersonalWorkspace(user.id, user.email);
+
+                // Set the workspace context
+                await db.exec`SELECT set_config('app.workspace_id', ${workspaceId}, false)`;
+
+                return {
+                    user,
+                    workspace_id: workspaceId,
+                };
+            }
+
+            // Update existing user info
+            user = await db.queryRow<User>`
+        UPDATE users
+        SET 
+          email = ${userInfo.email},
+          name = ${userInfo.name || null},
+          picture = ${userInfo.picture || null}
+        WHERE id = ${userInfo.sub}
+        RETURNING id, email, name, picture, is_superuser
+      `;
+
+            if (!user) {
+                throw APIError.internal("Failed to update user");
+            }
+
+            // Get user's first workspace
+            const workspace = await db.queryRow<{ id: string }>`
+        SELECT workspace_id as id
+        FROM user_workspaces
+        WHERE user_id = ${user.id}::uuid
+        LIMIT 1
+      `;
+
+            let workspaceId: string;
+            if (!workspace) {
+                // If no workspace exists, create one
+                workspaceId = await createPersonalWorkspace(user.id, user.email);
+            } else {
+                workspaceId = workspace.id;
+            }
+
+            // Set the user and workspace context
+            await db.exec`SELECT set_config('app.user_id', ${user.id}::text, false)`;
+            await db.exec`SELECT set_config('app.workspace_id', ${workspaceId}::text, false)`;
+
+            return {
+                user,
+                workspace_id: workspaceId,
+            };
+        } catch (error) {
+            console.error("Logto callback error:", error);
+            throw APIError.internal("Authentication failed");
         }
-
-        // Hash password
-        const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-
-        // Create user
-        const user = await db.queryRow<User>`
-      INSERT INTO users (email, password_hash)
-      VALUES (${email}, ${passwordHash})
-      RETURNING id, email, password_hash
-    `;
-
-        if (!user) {
-            throw APIError.internal("Failed to create user");
-        }
-
-        // Create personal workspace and grant access
-        const workspaceId = await createPersonalWorkspace(user.id, email);
-
-        // Generate JWT
-        const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "24h" });
-
-        // Set the workspace context
-        await db.exec`SELECT set_config('app.workspace_id', ${workspaceId}, false)`;
-
-        return {
-            token,
-            user: {
-                id: user.id,
-                email: user.email,
-            },
-            workspace_id: workspaceId,
-        };
     }
 );
 
-// Login user
-export const login = api(
-    { expose: true, auth: false, method: "POST", path: "/auth/login" },
-    async (req: LoginRequest): Promise<AuthResponse> => {
-        const { email, password } = req;
+// Get current user info
+export const getCurrentUser = api(
+    { expose: true, method: "GET", path: "/auth/me" },
+    async (): Promise<User> => {
+        const userId = await db.queryRow<{ id: string }>`
+      SELECT current_setting('app.user_id', true) as id
+    `;
 
-        // Find user
+        if (!userId?.id) {
+            throw APIError.unauthenticated("No active session");
+        }
+
         const user = await db.queryRow<User>`
-            SELECT * FROM users WHERE email = ${email}
-        `;
+      SELECT id, email, name, picture, is_superuser
+      FROM users
+      WHERE id = ${userId.id}::uuid
+    `;
 
         if (!user) {
-            throw APIError.unauthenticated("Invalid credentials");
+            throw APIError.notFound("User not found");
         }
 
-        // Verify password using bcrypt
-        const isValid = await bcrypt.compare(password, user.password_hash);
-        if (!isValid) {
-            throw APIError.unauthenticated("Invalid credentials");
-        }
-
-        // Get user's first workspace
-        const workspace = await db.queryRow<{ id: string }>`
-            SELECT workspace_id as id
-            FROM user_workspaces
-            WHERE user_id = ${user.id}::uuid
-            LIMIT 1
-        `;
-
-        let workspaceId: string;
-        if (!workspace) {
-            // If no workspace exists, create one
-            workspaceId = await createPersonalWorkspace(user.id, email);
-        } else {
-            workspaceId = workspace.id;
-        }
-
-        // Generate JWT
-        const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "24h" });
-
-        // Store the current token
-        currentToken = token;
-
-        // Set the user and workspace context
-        await db.exec`SELECT set_config('app.user_id', ${user.id}::text, false)`;
-        await db.exec`SELECT set_config('app.workspace_id', ${workspaceId}::text, false)`;
-
-        return {
-            token,
-            user: {
-                id: user.id,
-                email: user.email,
-            },
-            workspace_id: workspaceId,
-        };
-    }
-);
-
-// Get current token
-export const getCurrentToken = api(
-    { expose: true, auth: false, method: "GET", path: "/auth/token" },
-    async (): Promise<{ token: string | null }> => {
-        return { token: currentToken };
+        return user;
     }
 );
 
 // Logout user
 export const logout = api(
-    { expose: true, auth: false, method: "POST", path: "/auth/logout" },
+    { expose: true, method: "POST", path: "/auth/logout" },
     async (): Promise<{ success: boolean }> => {
-        if (currentToken) {
-            // Add the current token to the blacklist
-            blacklistedTokens.add(currentToken);
-
-            // Clear the current token
-            currentToken = null;
+        try {
+            await logtoClient.signOut();
 
             // Clear the user and workspace context
             await db.exec`SELECT set_config('app.user_id', '', false)`;
             await db.exec`SELECT set_config('app.workspace_id', '', false)`;
-        }
 
-        return { success: true };
+            return { success: true };
+        } catch (error) {
+            console.error("Logout error:", error);
+            throw APIError.internal("Logout failed");
+        }
     }
 );
 
-// Middleware to verify JWT and set user context
-export const verifyToken = async (token: string): Promise<string> => {
+// Middleware to verify user context
+export const verifyToken = async (token?: string): Promise<string> => {
     try {
+        if (!token) {
+            throw APIError.unauthenticated("No token provided");
+        }
+
         // Remove 'Bearer ' prefix if present
         const cleanToken = token.startsWith('Bearer ') ? token.slice(7) : token;
 
-        // Check if token is blacklisted
-        if (isTokenBlacklisted(cleanToken)) {
-            throw APIError.unauthenticated("Token has been revoked");
+        // Get user info
+        const userInfo = await logtoClient.fetchUserInfo();
+
+        if (!userInfo.sub) {
+            throw APIError.unauthenticated("Invalid token");
         }
 
-        const decoded = jwt.verify(cleanToken, JWT_SECRET) as { userId: string };
-        return decoded.userId;
+        // Set the user context
+        await db.exec`SELECT set_config('app.user_id', ${userInfo.sub}::text, false)`;
+
+        return userInfo.sub;
     } catch (error) {
         console.error("Token verification failed:", error);
         throw APIError.unauthenticated("Invalid token");
     }
-}; 
+};
+
+// Login endpoint that redirects to Logto
+export const login = api(
+    { expose: true, auth: false, method: "GET", path: "/auth/login" },
+    async (): Promise<RedirectResponse> => {
+        try {
+            console.log("Logto config:", {
+                endpoint: logtoConfig.endpoint,
+                appId: logtoConfig.appId ? "set" : "not set",
+                appSecret: logtoConfig.appSecret ? "set" : "not set"
+            });
+
+            if (!logtoConfig.endpoint) {
+                throw new Error("LOGTO_ENDPOINT is not set");
+            }
+            if (!logtoConfig.appId) {
+                throw new Error("LOGTO_APP_ID is not set");
+            }
+
+            const scopes = logtoConfig.scopes || ['openid', 'profile', 'email'];
+            const callbackUrl = "http://localhost:4000/auth/callback";
+
+            // Generate PKCE challenge
+            const codeVerifier = generateRandomString(64);
+            const codeChallenge = await generateCodeChallenge(codeVerifier);
+
+            const url = `https://gtkmrh.logto.app/oidc/auth?` +
+                `client_id=${logtoConfig.appId}&` +
+                `redirect_uri=${encodeURIComponent(callbackUrl)}&` +
+                `response_type=code&` +
+                `scope=${encodeURIComponent(scopes.join(' '))}&` +
+                `code_challenge=${codeChallenge}&` +
+                `code_challenge_method=S256`;
+
+            return { redirect_url: url };
+        } catch (error: any) {
+            console.error("Login error:", error);
+            throw APIError.internal("Failed to initiate login: " + (error?.message || "Unknown error"));
+        }
+    }
+);
+
+// Helper function to generate random string for PKCE
+function generateRandomString(length: number): string {
+    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let text = '';
+    for (let i = 0; i < length; i++) {
+        text += possible.charAt(Math.floor(Math.random() * possible.length));
+    }
+    return text;
+}
+
+// Helper function to generate code challenge for PKCE
+async function generateCodeChallenge(verifier: string): Promise<string> {
+    const hash = createHash('sha256').update(verifier).digest('base64');
+    return hash
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+} 
