@@ -11,10 +11,11 @@
   "devDependencies": {
     "@types/node": "^20.5.7",
     "typescript": "^5.2.2",
-    "vitest": "^2.1.4"
+    "vitest": "^3.1.2"
   },
   "dependencies": {
-    "encore.dev": "^1.46.20"
+    "encore.dev": "^1.46.20",
+    "ts-node": "^10.9.2"
   },
   "optionalDependencies": {
     "@rollup/rollup-linux-x64-gnu": "^4.13.0"

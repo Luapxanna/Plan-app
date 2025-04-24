@@ -4,4 +4,4 @@ import { Service } from "encore.dev/service";
 // https://encore.dev/docs/ts/primitives/services
 
 // The url service is used to shorten URLs.
-export default new Service("url");
+export default new Service("plan");
