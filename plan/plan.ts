@@ -364,52 +364,6 @@ export const getCurrentUser = api(
   }
 );
 
-// Get all workspaces (for superusers) or user's workspaces
-export const getAllWorkspaces = api(
-  { expose: true, method: "GET", path: "/workspaces" },
-  async (): Promise<ListWorkspacesResponse> => {
-    await verifyAndSetUserContext();
-    const userId = await db.queryRow<{ user_id: string }>`
-      SELECT current_setting('app.user_id', true) as user_id
-    `;
-
-    if (!userId?.user_id) {
-      throw APIError.notFound("User not found");
-    }
-
-    const user = await db.queryRow<{ is_superuser: boolean }>`
-      SELECT is_superuser
-      FROM users
-      WHERE id = ${userId.user_id}::uuid
-    `;
-
-    if (!user) {
-      throw APIError.notFound("User not found");
-    }
-
-    const workspaces: Workspace[] = [];
-    if (user.is_superuser) {
-      const rows = await db.query<Workspace>`
-        SELECT id, name FROM workspace
-      `;
-      for await (const row of rows) {
-        workspaces.push(row);
-      }
-    } else {
-      const rows = await db.query<Workspace>`
-        SELECT w.id, w.name
-        FROM workspace w
-        JOIN user_workspaces uw ON uw.workspace_id = w.id
-        WHERE uw.user_id = ${userId.user_id}::uuid
-      `;
-      for await (const row of rows) {
-        workspaces.push(row);
-      }
-    }
-    return { workspaces };
-  }
-);
-
 // Grant workspace access to a user
 export const grantWorkspaceAccess = api(
   { expose: true, method: "POST", path: "/workspace/:workspace_id/grant/:user_id" },
