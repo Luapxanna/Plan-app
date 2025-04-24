@@ -9,8 +9,10 @@ const db = new SQLDatabase("url", { migrations: "./migrations" });
 const JWT_SECRET = process.env.JWT_SECRET || "development-secret-key-change-in-production";
 const SALT_ROUNDS = 10;
 
-// Store the current token in memory (in production, use a secure storage)
+// Store the current token and blacklisted tokens in memory
+// In production, use a secure storage like Redis
 let currentToken: string | null = null;
+const blacklistedTokens = new Set<string>();
 
 interface User {
     id: string;
@@ -55,6 +57,11 @@ async function createPersonalWorkspace(userId: string, email: string): Promise<s
     }
 
     return workspace.id;
+}
+
+// Helper function to check if a token is blacklisted
+function isTokenBlacklisted(token: string): boolean {
+    return blacklistedTokens.has(token);
 }
 
 // Register a new user
@@ -121,7 +128,7 @@ export const login = api(
             throw APIError.unauthenticated("Invalid credentials");
         }
 
-        // Verify password
+        // Verify password using bcrypt
         const isValid = await bcrypt.compare(password, user.password_hash);
         if (!isValid) {
             throw APIError.unauthenticated("Invalid credentials");
@@ -143,15 +150,15 @@ export const login = api(
             workspaceId = workspace.id;
         }
 
-        // Set the workspace context
-        await db.exec`SELECT set_config('app.workspace_id', ${workspaceId}::text, false)`;
-        await db.exec`SELECT set_config('app.user_id', ${user.id}::text, false)`;
-
         // Generate JWT
         const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: "24h" });
 
         // Store the current token
         currentToken = token;
+
+        // Set the user and workspace context
+        await db.exec`SELECT set_config('app.user_id', ${user.id}::text, false)`;
+        await db.exec`SELECT set_config('app.workspace_id', ${workspaceId}::text, false)`;
 
         return {
             token,
@@ -176,12 +183,17 @@ export const getCurrentToken = api(
 export const logout = api(
     { expose: true, auth: false, method: "POST", path: "/auth/logout" },
     async (): Promise<{ success: boolean }> => {
-        // Clear the current token
-        currentToken = null;
+        if (currentToken) {
+            // Add the current token to the blacklist
+            blacklistedTokens.add(currentToken);
 
-        // Clear the user and workspace context
-        await db.exec`SELECT set_config('app.user_id', '', false)`;
-        await db.exec`SELECT set_config('app.workspace_id', '', false)`;
+            // Clear the current token
+            currentToken = null;
+
+            // Clear the user and workspace context
+            await db.exec`SELECT set_config('app.user_id', '', false)`;
+            await db.exec`SELECT set_config('app.workspace_id', '', false)`;
+        }
 
         return { success: true };
     }
@@ -192,6 +204,12 @@ export const verifyToken = async (token: string): Promise<string> => {
     try {
         // Remove 'Bearer ' prefix if present
         const cleanToken = token.startsWith('Bearer ') ? token.slice(7) : token;
+
+        // Check if token is blacklisted
+        if (isTokenBlacklisted(cleanToken)) {
+            throw APIError.unauthenticated("Token has been revoked");
+        }
+
         const decoded = jwt.verify(cleanToken, JWT_SECRET) as { userId: string };
         return decoded.userId;
     } catch (error) {

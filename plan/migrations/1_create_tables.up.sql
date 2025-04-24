@@ -2,7 +2,10 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE workspace (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL
+  name TEXT NOT NULL,
+  created_by UUID,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  member_count INT DEFAULT 0
 );
 
 CREATE TABLE plan (
@@ -11,11 +14,4 @@ CREATE TABLE plan (
   workspace_id UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE
 );
 
-ALTER TABLE plan DISABLE ROW LEVEL SECURITY;
-
-CREATE POLICY rls_plan_isolation ON plan
-  USING (workspace_id::text = current_setting('app.workspace_id', true));
 -- Insert test workspaces
-
-
-ALTER TABLE plan ENABLE ROW LEVEL SECURITY;
