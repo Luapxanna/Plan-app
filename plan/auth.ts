@@ -2,7 +2,6 @@ import { api, APIError } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 import LogtoClient from '@logto/node';
 import { LogtoConfig } from '@logto/node';
-import { createHash } from 'crypto';
 
 const db = new SQLDatabase("plan", { migrations: "./migrations" });
 
@@ -11,26 +10,35 @@ const logtoConfig: LogtoConfig = {
     endpoint: process.env.LOGTO_ENDPOINT || 'https://gtkmrh.logto.app/',
     appId: process.env.LOGTO_APP_ID || 'hcql8o16wg2gilpxaoek6',
     appSecret: process.env.LOGTO_APP_SECRET || 'z1IzhncJbEbZqquCkRZAMCFUad1z36r5',
-    scopes: ['openid', 'profile', 'email'],
-    resources: ['https://api.example.com']
+    scopes: ['openid', 'profile', 'email', 'custom_data'],
+    resources: ['http://localhost:4000']
 };
 
-const logtoClient = new LogtoClient(logtoConfig, {
+// In-memory storage for session management
+const sessionStorage = new Map<string, { codeVerifier: string; accessToken?: string }>();
+
+const createLogtoClient = () => new LogtoClient(logtoConfig, {
     navigate: (url: string) => {
-        // Handle navigation if needed
+        console.log('Navigation requested to:', url);
     },
     storage: {
         getItem: async (key: string) => {
-            // Implement storage get
-            return null;
+            const session = sessionStorage.get(key);
+            if (key === 'access_token') return session?.accessToken || null;
+            return session?.codeVerifier || null;
         },
         setItem: async (key: string, value: string) => {
-            // Implement storage set
+            const existingSession = sessionStorage.get(key) || { codeVerifier: '' };
+            if (key === 'access_token') {
+                sessionStorage.set(key, { ...existingSession, accessToken: value });
+            } else {
+                sessionStorage.set(key, { ...existingSession, codeVerifier: value });
+            }
         },
         removeItem: async (key: string) => {
-            // Implement storage remove
-        },
-    },
+            sessionStorage.delete(key);
+        }
+    }
 });
 
 interface User {
@@ -50,160 +58,184 @@ interface RedirectResponse {
     redirect_url: string;
 }
 
-// Helper function to create a personal workspace for a user
-async function createPersonalWorkspace(userId: string, email: string): Promise<string> {
-    const workspace = await db.queryRow<{ id: string }>`
-    WITH new_workspace AS (
-      INSERT INTO workspaces (name)
-      VALUES (${`${email}'s Workspace`})
-      RETURNING id
-    )
-    INSERT INTO user_workspaces (user_id, workspace_id)
-    SELECT ${userId}::uuid, id FROM new_workspace
-    RETURNING workspace_id
-  `;
-
-    if (!workspace) {
-        throw APIError.internal("Failed to create workspace");
-    }
-
-    return workspace.id;
+interface LogtoUserInfo {
+    sub: string;
+    email: string;
+    name?: string;
+    picture?: string;
+    is_superuser?: boolean;
+    custom_data?: {
+        is_superuser?: boolean;
+        [key: string]: unknown;
+    };
 }
 
-// Get user info from Logto and create/update user in our database
-export const handleLogtoCallback = api(
-    { expose: true, auth: false, method: "POST", path: "/auth/callback" },
-    async ({ code }: { code: string }): Promise<AuthResponse> => {
+interface ListUsersResponse {
+    users: User[];
+}
+
+interface LogtoUser {
+    id: string;
+    username?: string;
+    primaryEmail?: string;
+    name?: string;
+    avatar?: string;
+    customData?: {
+        is_superuser?: boolean;
+        [key: string]: unknown;
+    };
+}
+
+interface TokenResponse {
+    access_token: string;
+}
+
+// Login endpoint
+export const login = api(
+    { method: "GET", path: "/auth/login", expose: true },
+    async (): Promise<void> => {
         try {
-            // Exchange code for tokens
-            await logtoClient.handleSignInCallback(code);
+            const logtoClient = createLogtoClient();
+            const callbackUrl = `${process.env.API_URL || 'http://localhost:4000'}/auth/callback`;
 
-            // Get user info from Logto
-            const userInfo = await logtoClient.getIdTokenClaims();
-
-            if (!userInfo.sub || !userInfo.email) {
-                throw APIError.internal("Invalid user info from Logto");
-            }
-
-            // Check if user exists in our database
-            let user = await db.queryRow<User>`
-        SELECT * FROM users WHERE id = ${userInfo.sub}
-      `;
-
-            if (!user) {
-                // Create new user
-                user = await db.queryRow<User>`
-          INSERT INTO users (id, email, name, picture, is_superuser)
-          VALUES (
-            ${userInfo.sub},
-            ${userInfo.email},
-            ${userInfo.name || null},
-            ${userInfo.picture || null},
-            false
-          )
-          RETURNING id, email, name, picture, is_superuser
-        `;
-
-                if (!user) {
-                    throw APIError.internal("Failed to create user");
-                }
-
-                // Create personal workspace
-                const workspaceId = await createPersonalWorkspace(user.id, user.email);
-
-                // Set the workspace context
-                await db.exec`SELECT set_config('app.workspace_id', ${workspaceId}, false)`;
-
-                return {
-                    user,
-                    workspace_id: workspaceId,
-                };
-            }
-
-            // Update existing user info
-            user = await db.queryRow<User>`
-        UPDATE users
-        SET 
-          email = ${userInfo.email},
-          name = ${userInfo.name || null},
-          picture = ${userInfo.picture || null}
-        WHERE id = ${userInfo.sub}
-        RETURNING id, email, name, picture, is_superuser
-      `;
-
-            if (!user) {
-                throw APIError.internal("Failed to update user");
-            }
-
-            // Get user's first workspace
-            const workspace = await db.queryRow<{ id: string }>`
-        SELECT workspace_id as id
-        FROM user_workspaces
-        WHERE user_id = ${user.id}::uuid
-        LIMIT 1
-      `;
-
-            let workspaceId: string;
-            if (!workspace) {
-                // If no workspace exists, create one
-                workspaceId = await createPersonalWorkspace(user.id, user.email);
-            } else {
-                workspaceId = workspace.id;
-            }
-
-            // Set the user and workspace context
-            await db.exec`SELECT set_config('app.user_id', ${user.id}::text, false)`;
-            await db.exec`SELECT set_config('app.workspace_id', ${workspaceId}::text, false)`;
-
-            return {
-                user,
-                workspace_id: workspaceId,
-            };
+            // Initiate the sign-in flow
+            await logtoClient.signIn(callbackUrl);
         } catch (error) {
-            console.error("Logto callback error:", error);
-            throw APIError.internal("Authentication failed");
+            console.error('Login failed:', error);
+            throw APIError.internal(`Login failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
     }
 );
 
-// Get current user info
+// Callback endpoint
+export const callback = api(
+    { method: "GET", path: "/auth/callback", expose: true },
+    async ({ code, state }: { code?: string, state?: string }): Promise<{ access_token: string; user_id: string }> => {
+        try {
+            if (!code) {
+                throw APIError.invalidArgument("Authorization code is required");
+            }
+
+            const logtoClient = createLogtoClient();
+
+            try {
+                // Handle the callback and exchange code for tokens
+                await logtoClient.handleSignInCallback(`${process.env.API_URL || 'http://localhost:4000'}/auth/callback?code=${code}&state=${state || ''}`);
+            } catch (error) {
+                // If session not found, redirect to login
+                if (error instanceof Error && error.message.includes('Sign-in session not found')) {
+                    await logtoClient.signIn(`${process.env.API_URL || 'http://localhost:4000'}/auth/callback`);
+                    throw APIError.unauthenticated("Session expired, please login again");
+                }
+                throw error;
+            }
+
+            // Get both ID token claims and user info
+            const claims = await logtoClient.getIdTokenClaims();
+            const userInfo = await logtoClient.fetchUserInfo();
+
+            if (!userInfo.sub) {
+                throw APIError.internal("Failed to get user information");
+            }
+
+            // Check if user is superuser from either source
+            const customData = (claims?.custom_data || userInfo.custom_data) as { is_superuser?: boolean } | undefined;
+            const isSuperuser = customData?.is_superuser === true;
+
+            console.log('Callback user info:', { claims, userInfo, customData, isSuperuser });
+
+            // Create or update user in database
+            await db.exec`
+                INSERT INTO users (id, email, name, picture, is_superuser)
+                VALUES (
+                    ${userInfo.sub},
+                    ${userInfo.email},
+                    ${userInfo.name},
+                    ${userInfo.picture},
+                    ${isSuperuser}
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    email = ${userInfo.email},
+                    name = ${userInfo.name},
+                    picture = ${userInfo.picture},
+                    is_superuser = ${isSuperuser}
+            `;
+
+            // Get access token
+            const accessToken = await logtoClient.getAccessToken();
+
+            return {
+                access_token: accessToken,
+                user_id: userInfo.sub
+            };
+        } catch (error) {
+            console.error("Callback error:", error);
+            throw APIError.internal(`Authentication failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+    }
+);
+
+// Get current user
 export const getCurrentUser = api(
     { expose: true, method: "GET", path: "/auth/me" },
     async (): Promise<User> => {
-        const userId = await db.queryRow<{ id: string }>`
-      SELECT current_setting('app.user_id', true) as id
-    `;
+        try {
+            const logtoClient = createLogtoClient();
+            const userInfo = await logtoClient.getIdTokenClaims() as LogtoUserInfo;
+            if (!userInfo?.sub) throw APIError.unauthenticated("No active session");
 
-        if (!userId?.id) {
-            throw APIError.unauthenticated("No active session");
+            // Get full user info which might contain additional claims
+            const fullUserInfo = await logtoClient.fetchUserInfo() as LogtoUserInfo;
+
+            // Log raw data for debugging
+            console.log('Raw token claims:', JSON.stringify(userInfo, null, 2));
+            console.log('Raw user info:', JSON.stringify(fullUserInfo, null, 2));
+            console.log('Custom data from token:', userInfo.custom_data);
+            console.log('Custom data from user info:', fullUserInfo.custom_data);
+
+            // Check for superuser in various possible locations
+            const isSuperuser = Boolean(
+                userInfo.is_superuser === true ||
+                fullUserInfo.is_superuser === true ||
+                (userInfo.custom_data && userInfo.custom_data.is_superuser === true) ||
+                (fullUserInfo.custom_data && fullUserInfo.custom_data.is_superuser === true)
+            );
+
+            console.log('Final superuser status:', isSuperuser);
+
+            const user = await db.queryRow<User>`
+                SELECT * FROM users WHERE id = ${userInfo.sub}
+            `;
+            if (!user) throw APIError.notFound("User not found");
+
+            // Update superuser status if it changed
+            if (user.is_superuser !== isSuperuser) {
+                console.log('Updating superuser status from', user.is_superuser, 'to', isSuperuser);
+                await db.exec`
+                    UPDATE users 
+                    SET is_superuser = ${isSuperuser}
+                    WHERE id = ${userInfo.sub}
+                `;
+                user.is_superuser = isSuperuser;
+            }
+
+            return user;
+        } catch (error) {
+            console.error('Get current user error:', error);
+            throw error instanceof APIError ? error : APIError.unauthenticated("Authentication failed");
         }
-
-        const user = await db.queryRow<User>`
-      SELECT id, email, name, picture, is_superuser
-      FROM users
-      WHERE id = ${userId.id}::uuid
-    `;
-
-        if (!user) {
-            throw APIError.notFound("User not found");
-        }
-
-        return user;
     }
 );
 
-// Logout user
+// Logout
 export const logout = api(
-    { expose: true, method: "POST", path: "/auth/logout" },
-    async (): Promise<{ success: boolean }> => {
+    { method: "POST", path: "/auth/logout", expose: true },
+    async (): Promise<void> => {
         try {
+            const logtoClient = createLogtoClient();
+            // Clear the session and sign out
             await logtoClient.signOut();
-
-            // Clear the user and workspace context
-            await db.exec`SELECT set_config('app.user_id', '', false)`;
-            await db.exec`SELECT set_config('app.workspace_id', '', false)`;
-
-            return { success: true };
+            // Redirect to Logto's logout page
         } catch (error) {
             console.error("Logout error:", error);
             throw APIError.internal("Logout failed");
@@ -211,89 +243,87 @@ export const logout = api(
     }
 );
 
-// Middleware to verify user context
-export const verifyToken = async (token?: string): Promise<string> => {
-    try {
-        if (!token) {
-            throw APIError.unauthenticated("No token provided");
-        }
-
-        // Remove 'Bearer ' prefix if present
-        const cleanToken = token.startsWith('Bearer ') ? token.slice(7) : token;
-
-        // Get user info
-        const userInfo = await logtoClient.fetchUserInfo();
-
-        if (!userInfo.sub) {
-            throw APIError.unauthenticated("Invalid token");
-        }
-
-        // Set the user context
-        await db.exec`SELECT set_config('app.user_id', ${userInfo.sub}::text, false)`;
-
-        return userInfo.sub;
-    } catch (error) {
-        console.error("Token verification failed:", error);
-        throw APIError.unauthenticated("Invalid token");
-    }
-};
-
-// Login endpoint that redirects to Logto
-export const login = api(
-    { expose: true, auth: false, method: "GET", path: "/auth/login" },
-    async (): Promise<RedirectResponse> => {
+// List all users (superuser only)
+export const listUsers = api(
+    { expose: true, method: "GET", path: "/auth/users" },
+    async (): Promise<ListUsersResponse> => {
         try {
-            console.log("Logto config:", {
-                endpoint: logtoConfig.endpoint,
-                appId: logtoConfig.appId ? "set" : "not set",
-                appSecret: logtoConfig.appSecret ? "set" : "not set"
+            // First verify the current user is a superuser
+            const logtoClient = createLogtoClient();
+            const userInfo = await logtoClient.getIdTokenClaims() as LogtoUserInfo;
+            if (!userInfo?.sub) throw APIError.unauthenticated("No active session");
+
+            const currentUser = await db.queryRow<User>`
+                SELECT * FROM users WHERE id = ${userInfo.sub}
+            `;
+            if (!currentUser?.is_superuser) {
+                throw APIError.permissionDenied("Only superusers can list all users");
+            }
+
+            // Get management access token using management API endpoint
+            const baseUrl = logtoConfig.endpoint.replace(/\/$/, ''); // Remove trailing slash if present
+            const tokenResponse = await fetch(`${baseUrl}/api/m2m/token`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    appId: logtoConfig.appId,
+                    appSecret: logtoConfig.appSecret,
+                }),
             });
 
-            if (!logtoConfig.endpoint) {
-                throw new Error("LOGTO_ENDPOINT is not set");
+            if (!tokenResponse.ok) {
+                const error = await tokenResponse.text();
+                console.error('Token response error:', error);
+                throw new Error(`Failed to get management access token: ${error}`);
             }
-            if (!logtoConfig.appId) {
-                throw new Error("LOGTO_APP_ID is not set");
+
+            const { access_token } = await tokenResponse.json() as { access_token: string };
+
+            // Fetch users from Logto management API
+            const usersResponse = await fetch(`${baseUrl}/api/users`, {
+                headers: {
+                    'Authorization': `Bearer ${access_token}`,
+                    'Content-Type': 'application/json'
+                },
+            });
+
+            if (!usersResponse.ok) {
+                const error = await usersResponse.text();
+                console.error('Users response error:', error);
+                throw new Error(`Failed to fetch users from Logto: ${error}`);
             }
 
-            const scopes = logtoConfig.scopes || ['openid', 'profile', 'email'];
-            const callbackUrl = "http://localhost:4000/auth/callback";
+            const { users: logtoUsers } = await usersResponse.json() as { users: LogtoUser[] };
 
-            // Generate PKCE challenge
-            const codeVerifier = generateRandomString(64);
-            const codeChallenge = await generateCodeChallenge(codeVerifier);
+            // Convert Logto users to our User format
+            const users: User[] = logtoUsers.map(logtoUser => ({
+                id: logtoUser.id,
+                email: logtoUser.primaryEmail || '',
+                name: logtoUser.name || logtoUser.username || '',
+                picture: logtoUser.avatar || undefined,
+                is_superuser: logtoUser.customData?.is_superuser === true
+            }));
 
-            const url = `https://gtkmrh.logto.app/oidc/auth?` +
-                `client_id=${logtoConfig.appId}&` +
-                `redirect_uri=${encodeURIComponent(callbackUrl)}&` +
-                `response_type=code&` +
-                `scope=${encodeURIComponent(scopes.join(' '))}&` +
-                `code_challenge=${codeChallenge}&` +
-                `code_challenge_method=S256`;
-
-            return { redirect_url: url };
-        } catch (error: any) {
-            console.error("Login error:", error);
-            throw APIError.internal("Failed to initiate login: " + (error?.message || "Unknown error"));
+            return { users };
+        } catch (error) {
+            console.error('List users error:', error);
+            throw error instanceof APIError ? error : APIError.internal("Failed to list users");
         }
     }
 );
 
-// Helper function to generate random string for PKCE
-function generateRandomString(length: number): string {
-    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    let text = '';
-    for (let i = 0; i < length; i++) {
-        text += possible.charAt(Math.floor(Math.random() * possible.length));
-    }
-    return text;
-}
+// Verify token and set user context
+export const verifyToken = async (): Promise<string> => {
+    try {
+        const logtoClient = createLogtoClient();
+        const userInfo = await logtoClient.getIdTokenClaims();
+        if (!userInfo?.sub) throw APIError.unauthenticated("No active session");
 
-// Helper function to generate code challenge for PKCE
-async function generateCodeChallenge(verifier: string): Promise<string> {
-    const hash = createHash('sha256').update(verifier).digest('base64');
-    return hash
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/, '');
-} 
+        await db.exec`SELECT set_config('app.user_id', ${userInfo.sub}, false)`;
+        return userInfo.sub;
+    } catch (error) {
+        throw error instanceof APIError ? error : APIError.unauthenticated("Authentication failed");
+    }
+};

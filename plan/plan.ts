@@ -45,7 +45,7 @@ async function verifyAndSetUserContext(): Promise<void> {
   }
 
   // Set user context
-  await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
+  await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
 
   // Get user's first workspace if not set
   const currentWorkspace = await db.queryRow<{ workspace_id: string }>`
@@ -56,12 +56,12 @@ async function verifyAndSetUserContext(): Promise<void> {
     const workspace = await db.queryRow<{ id: string }>`
         SELECT workspace_id as id
         FROM user_workspaces
-        WHERE user_id = ${userId}::uuid
+        WHERE user_id = ${userId}
         LIMIT 1
     `;
 
     if (workspace) {
-      await db.exec`SELECT set_config('app.workspace_id', ${workspace.id}::text, false)`;
+      await db.exec`SELECT set_config('app.workspace_id', ${workspace.id}, false)`;
     }
   }
 }
@@ -72,7 +72,7 @@ export async function getCurrentWorkspace(): Promise<Workspace> {
   if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
+  await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
 
   const workspaceId = await checkWorkspaceContext();
   if (!workspaceId) {
@@ -105,7 +105,7 @@ export const changeCurrentWorkspace = api(
       WITH active_user AS (
         SELECT id, is_superuser 
         FROM users 
-        WHERE id::text = current_setting('app.user_id', true)::text
+        WHERE id = current_setting('app.user_id', true)
       )
       SELECT w.id 
       FROM workspace w
@@ -113,7 +113,7 @@ export const changeCurrentWorkspace = api(
       WHERE w.id = ${workspace_id}::uuid 
       AND (
         EXISTS (SELECT 1 FROM active_user WHERE is_superuser = true)
-        OR uw.user_id::text = current_setting('app.user_id', true)::text
+        OR uw.user_id = current_setting('app.user_id', true)
       )
     `;
 
@@ -122,7 +122,7 @@ export const changeCurrentWorkspace = api(
     }
 
     // Set the workspace context
-    await db.exec`SELECT set_config('app.workspace_id', ${workspace_id}::text, false)`;
+    await db.exec`SELECT set_config('app.workspace_id', ${workspace_id}, false)`;
   }
 );
 
@@ -135,7 +135,7 @@ export const create = api(
 
     const plan = await db.queryRow<Plan>`
             INSERT INTO plan (name, workspace_id)
-            VALUES (${name}, ${workspace_id}::uuid)
+            VALUES (${name}, ${workspace_id})
             RETURNING id, name, workspace_id
         `;
 
@@ -157,7 +157,7 @@ export const get = api(
             SELECT p.id, p.name, p.workspace_id
             FROM plan p
             JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
-            WHERE p.id = ${id}::uuid AND uw.user_id = current_setting('app.user_id', true)::uuid
+            WHERE p.id = ${id} AND uw.user_id = current_setting('app.user_id', true)
         `;
 
     if (!plan) {
@@ -178,9 +178,9 @@ export const update = api(
             UPDATE plan p
             SET name = ${name}
             FROM user_workspaces uw
-            WHERE p.id = ${id}::uuid 
+            WHERE p.id = ${id}
                 AND p.workspace_id = uw.workspace_id 
-                AND uw.user_id = current_setting('app.user_id', true)::uuid
+                AND uw.user_id = current_setting('app.user_id', true)
             RETURNING p.id, p.name, p.workspace_id
         `;
 
@@ -202,7 +202,7 @@ export const remove = api(
             SELECT EXISTS (
                 SELECT 1 FROM plan p
                 JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
-                WHERE p.id = ${id}::uuid AND uw.user_id = current_setting('app.user_id', true)::uuid
+                WHERE p.id = ${id} AND uw.user_id = current_setting('app.user_id', true)
             ) as exists
         `;
 
@@ -213,9 +213,9 @@ export const remove = api(
     await db.exec`
             DELETE FROM plan p
             USING user_workspaces uw
-            WHERE p.id = ${id}::uuid 
+            WHERE p.id = ${id}
                 AND p.workspace_id = uw.workspace_id 
-                AND uw.user_id = current_setting('app.user_id', true)::uuid
+                AND uw.user_id = current_setting('app.user_id', true)
         `;
   }
 );
@@ -247,8 +247,8 @@ export const list = api(
                 SELECT p.id, p.name, p.workspace_id
                 FROM plan p
                 JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
-                WHERE p.workspace_id = ${workspace_id}::uuid 
-                    AND uw.user_id = current_setting('app.user_id', true)::uuid
+                WHERE p.workspace_id = ${workspace_id}
+                    AND uw.user_id = current_setting('app.user_id', true)
             `;
 
       for await (const row of rows) {
@@ -306,16 +306,18 @@ export const insertTestData = api(
 
 // Get all workspaces for the current user
 export const listWorkspaces = api(
-  { expose: true, method: "GET", path: "/workspace", auth: false },
+  { expose: true, method: "GET", path: "/workspace" },
   async (): Promise<ListWorkspacesResponse> => {
+    await verifyAndSetUserContext();
+
     const workspaces: Workspace[] = [];
     const rows = db.query<Workspace>`
       WITH active_user AS (
         SELECT id, is_superuser 
         FROM users 
-        WHERE id::text = current_setting('app.user_id', true)::text
+        WHERE id = current_setting('app.user_id', true)
       )
-      SELECT DISTINCT w.id, w.name, w.created_by, w.created_at,
+      SELECT DISTINCT w.id, w.name, w.created_at,
              (SELECT COUNT(*) FROM user_workspaces WHERE workspace_id = w.id) as member_count
       FROM workspace w
       LEFT JOIN user_workspaces uw ON w.id = uw.workspace_id
@@ -351,7 +353,7 @@ export const grantWorkspaceAccess = api(
     const isSuperuser = await db.queryRow<{ is_superuser: boolean }>`
       SELECT is_superuser
       FROM users
-      WHERE id = ${currentUserId.user_id}::uuid
+      WHERE id = ${currentUserId.user_id}
     `;
 
     if (!isSuperuser?.is_superuser) {
@@ -360,7 +362,7 @@ export const grantWorkspaceAccess = api(
 
     await db.exec`
       INSERT INTO user_workspaces (user_id, workspace_id)
-      VALUES (${user_id}::uuid, ${workspace_id}::uuid)
+      VALUES (${user_id}, ${workspace_id}::uuid)
       ON CONFLICT DO NOTHING
     `;
   }
@@ -382,7 +384,7 @@ export const revokeWorkspaceAccess = api(
     const isSuperuser = await db.queryRow<{ is_superuser: boolean }>`
       SELECT is_superuser
       FROM users
-      WHERE id = ${currentUserId.user_id}::uuid
+      WHERE id = ${currentUserId.user_id}
     `;
 
     if (!isSuperuser?.is_superuser) {
@@ -391,7 +393,7 @@ export const revokeWorkspaceAccess = api(
 
     await db.exec`
       DELETE FROM user_workspaces
-      WHERE user_id = ${user_id}::uuid AND workspace_id = ${workspace_id}::uuid
+      WHERE user_id = ${user_id} AND workspace_id = ${workspace_id}::uuid
     `;
   }
 );
@@ -412,7 +414,7 @@ export const getWorkspaceUsers = api(
     const isSuperuser = await db.queryRow<{ is_superuser: boolean }>`
       SELECT is_superuser
       FROM users
-      WHERE id = ${currentUserId.user_id}::uuid
+      WHERE id = ${currentUserId.user_id}
     `;
 
     if (!isSuperuser?.is_superuser) {
@@ -438,16 +440,16 @@ export async function createWorkspace(name: string): Promise<Workspace> {
   if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
+  await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
 
   const result = await db.queryRow<{ id: string }>`
     WITH new_workspace AS (
       INSERT INTO workspace (name, created_by)
-      VALUES (${name}, ${userId}::uuid)
+      VALUES (${name}, ${userId})
       RETURNING id
     )
     INSERT INTO user_workspaces (user_id, workspace_id)
-    SELECT ${userId}::uuid, id
+    SELECT ${userId}, id
     FROM new_workspace
     RETURNING workspace_id as id
   `;
@@ -457,7 +459,7 @@ export async function createWorkspace(name: string): Promise<Workspace> {
   }
 
   // Set the new workspace as current
-  await db.exec`SELECT set_config('app.workspace_id', ${result.id}::text, false)`;
+  await db.exec`SELECT set_config('app.workspace_id', ${result.id}, false)`;
 
   return getCurrentWorkspace();
 }
@@ -467,7 +469,7 @@ export async function updateWorkspace(workspaceId: string, name: string): Promis
   if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
+  await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
 
   const workspace = await db.queryRow<Workspace>`
     UPDATE workspaces
@@ -489,7 +491,7 @@ export async function deleteWorkspace(workspaceId: string): Promise<void> {
   if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
+  await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
 
   const result = await db.queryRow<{ deleted: boolean }>`
     WITH deleted AS (
@@ -511,7 +513,7 @@ export async function switchWorkspace(workspaceId: string): Promise<Workspace> {
   if (!userId) {
     throw APIError.unauthenticated("No active session. Please login first.");
   }
-  await db.exec`SELECT set_config('app.user_id', ${userId}::text, false)`;
+  await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
 
   const workspace = await db.queryRow<Workspace>`
     WITH active_user AS (
@@ -535,7 +537,7 @@ export async function switchWorkspace(workspaceId: string): Promise<Workspace> {
   }
 
   // Set the new workspace as current
-  await db.exec`SELECT set_config('app.workspace_id', ${workspaceId}::text, false)`;
+  await db.exec`SELECT set_config('app.workspace_id', ${workspaceId}, false)`;
 
   return workspace;
 }

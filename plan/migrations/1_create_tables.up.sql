@@ -3,15 +3,24 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE workspace (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
-  created_by UUID,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-  member_count INT DEFAULT 0
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE user_workspaces (
+  user_id TEXT NOT NULL,
+  workspace_id UUID NOT NULL REFERENCES workspace(id),
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, workspace_id)
 );
 
 CREATE TABLE plan (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspace(id),
   name TEXT NOT NULL,
-  workspace_id UUID NOT NULL REFERENCES workspace(id) ON DELETE CASCADE
+  description TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Insert test workspaces

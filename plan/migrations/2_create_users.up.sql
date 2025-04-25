@@ -1,16 +1,11 @@
 CREATE TABLE users (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL UNIQUE,
+  name TEXT,
+  picture TEXT,
+  is_superuser BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-  is_superuser BOOLEAN DEFAULT FALSE
-);
-
-CREATE TABLE user_workspaces (
-  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-  workspace_id UUID REFERENCES workspace(id) ON DELETE CASCADE,
-  PRIMARY KEY (user_id, workspace_id)
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Add RLS policies for users table
@@ -23,7 +18,7 @@ CREATE POLICY users_login ON users
 
 -- Allow users to access their own data
 CREATE POLICY users_isolation ON users
-  USING (id::text = current_setting('app.user_id', true));
+  USING (id = current_setting('app.user_id', true));
 
 -- Add RLS policies for user_workspaces table
 ALTER TABLE user_workspaces ENABLE ROW LEVEL SECURITY;
@@ -35,7 +30,7 @@ CREATE POLICY user_workspaces_login ON user_workspaces
 
 -- Allow users to access their own workspace associations
 CREATE POLICY user_workspaces_isolation ON user_workspaces
-  USING (user_id::text = current_setting('app.user_id', true));
+  USING (user_id = current_setting('app.user_id', true));
 
 -- Add RLS policies for workspace and plan
 ALTER TABLE workspace ENABLE ROW LEVEL SECURITY;
@@ -47,12 +42,12 @@ CREATE POLICY workspace_member_access ON workspace
     EXISTS (
       SELECT 1 FROM user_workspaces 
       WHERE workspace_id = workspace.id 
-      AND user_id::text = current_setting('app.user_id', true)
+      AND user_id = current_setting('app.user_id', true)
     )
     OR 
     EXISTS (
       SELECT 1 FROM users
-      WHERE id::text = current_setting('app.user_id', true)
+      WHERE id = current_setting('app.user_id', true)
       AND is_superuser = true
     )
   );
@@ -63,12 +58,12 @@ CREATE POLICY plan_workspace_access ON plan
     EXISTS (
       SELECT 1 FROM user_workspaces 
       WHERE workspace_id = plan.workspace_id 
-      AND user_id::text = current_setting('app.user_id', true)
+      AND user_id = current_setting('app.user_id', true)
     )
     OR
     EXISTS (
       SELECT 1 FROM users
-      WHERE id::text = current_setting('app.user_id', true)
+      WHERE id = current_setting('app.user_id', true)
       AND is_superuser = true
     )
   ); 
