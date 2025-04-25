@@ -260,51 +260,17 @@ export const listUsers = api(
                 throw APIError.permissionDenied("Only superusers can list all users");
             }
 
-            // Get management access token using management API endpoint
-            const baseUrl = logtoConfig.endpoint.replace(/\/$/, ''); // Remove trailing slash if present
-            const tokenResponse = await fetch(`${baseUrl}/api/m2m/token`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    appId: logtoConfig.appId,
-                    appSecret: logtoConfig.appSecret,
-                }),
-            });
+            // Get all users from local database
+            const users: User[] = [];
+            const rows = await db.query<User>`
+                SELECT id, email, name, picture, is_superuser
+                FROM users
+                ORDER BY email
+            `;
 
-            if (!tokenResponse.ok) {
-                const error = await tokenResponse.text();
-                console.error('Token response error:', error);
-                throw new Error(`Failed to get management access token: ${error}`);
+            for await (const row of rows) {
+                users.push(row);
             }
-
-            const { access_token } = await tokenResponse.json() as { access_token: string };
-
-            // Fetch users from Logto management API
-            const usersResponse = await fetch(`${baseUrl}/api/users`, {
-                headers: {
-                    'Authorization': `Bearer ${access_token}`,
-                    'Content-Type': 'application/json'
-                },
-            });
-
-            if (!usersResponse.ok) {
-                const error = await usersResponse.text();
-                console.error('Users response error:', error);
-                throw new Error(`Failed to fetch users from Logto: ${error}`);
-            }
-
-            const { users: logtoUsers } = await usersResponse.json() as { users: LogtoUser[] };
-
-            // Convert Logto users to our User format
-            const users: User[] = logtoUsers.map(logtoUser => ({
-                id: logtoUser.id,
-                email: logtoUser.primaryEmail || '',
-                name: logtoUser.name || logtoUser.username || '',
-                picture: logtoUser.avatar || undefined,
-                is_superuser: logtoUser.customData?.is_superuser === true
-            }));
 
             return { users };
         } catch (error) {
