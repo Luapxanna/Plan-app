@@ -1,8 +1,7 @@
 import { api, APIError } from "encore.dev/api";
-import { verifyToken } from "./auth";
+import { verifyToken, checkWorkspaceContext } from "./auth";
 import { db } from "./db";
 
-// 'plan' database is used to store the plans
 
 interface Workspace {
   id: string;
@@ -152,18 +151,29 @@ export const getPlan = api(
   async ({ id }: { id: string }): Promise<Plan> => {
     await verifyAndSetUserContext();
 
-    const plan = await db.queryRow<Plan>`
-            SELECT p.id, p.name, p.workspace_id
-            FROM plan p
-            JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
-            WHERE p.id = ${id} AND uw.user_id = current_setting('app.user_id', true)
-        `;
+    try {
+      const workspace_id = await checkWorkspaceContext();
+      const userId = await verifyToken();
 
-    if (!plan) {
-      throw APIError.notFound("Plan not found or access denied");
+      // Set user context for RLS
+      await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
+
+      const plan = await db.queryRow<Plan>`
+        SELECT p.*, u.name as user_name
+        FROM plan p
+        JOIN users u ON u.id = p.user_id
+        JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
+        WHERE p.id = ${id}
+        AND p.workspace_id = ${workspace_id}
+        AND (uw.user_id = ${userId} OR u.is_superuser)
+      `;
+
+      if (!plan) throw APIError.notFound("Plan not found or access denied");
+      return plan;
+    } catch (error) {
+      console.error("Error in get function:", error);
+      throw error;
     }
-
-    return plan;
   }
 );
 
@@ -219,41 +229,31 @@ export const removePlan = api(
   }
 );
 
-// Helper function to check current workspace context
-async function checkWorkspaceContext(): Promise<string> {
-  const result = await db.queryRow<{ workspace_id: string }>`
-    SELECT current_setting('app.workspace_id', false) as workspace_id
-  `;
-
-  if (!result || !result.workspace_id) {
-    throw APIError.invalidArgument("No workspace context set. Please set workspace context first.");
-  }
-
-  return result.workspace_id;
-}
-
-// List all plans in a workspace
+// List all plans
 export const listPlans = api(
   { expose: true, method: "GET", path: "/plan" },
-  async (): Promise<ListPlansResponse> => {
+  async (): Promise<{ plans: Plan[] }> => {
     await verifyAndSetUserContext();
 
     try {
       const workspace_id = await checkWorkspaceContext();
+      const userId = await verifyToken();
+
+      // Set user context for RLS
+      await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
 
       const plans: Plan[] = [];
-      const rows = db.query<Plan>`
-                SELECT p.id, p.name, p.workspace_id
-                FROM plan p
-                JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
-                WHERE p.workspace_id = ${workspace_id}
-                    AND uw.user_id = current_setting('app.user_id', true)
-            `;
+      const rows = await db.query<Plan>`
+        SELECT p.*, u.name as user_name
+        FROM plan p
+        JOIN users u ON u.id = p.user_id
+        JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
+        WHERE p.workspace_id = ${workspace_id}
+        AND (uw.user_id = ${userId} OR u.is_superuser)
+        ORDER BY p.created_at DESC
+      `;
 
-      for await (const row of rows) {
-        plans.push(row);
-      }
-
+      for await (const row of rows) plans.push(row);
       return { plans };
     } catch (error) {
       console.error("Error in list function:", error);

@@ -1,5 +1,5 @@
 import { api, APIError } from "encore.dev/api";
-import { verifyToken } from "./auth";
+import { verifyToken, checkWorkspaceContext } from "./auth";
 import { db } from "./db";
 
 interface Offer {
@@ -43,17 +43,29 @@ export const getOffer = api(
     async ({ id }: { id: string }): Promise<Offer> => {
         await verifyAndSetUserContext();
 
-        const offer = await db.queryRow<Offer>`
-            SELECT o.*
-            FROM offer o
-            JOIN user_workspaces uw ON uw.workspace_id = o.workspace_id
-            JOIN users u ON u.id = uw.user_id
-            WHERE o.id = ${id}
-            AND (uw.user_id = current_setting('app.user_id', true) OR u.is_superuser)
-        `;
+        try {
+            const workspace_id = await checkWorkspaceContext();
+            const userId = await verifyToken();
 
-        if (!offer) throw APIError.notFound("Offer not found or access denied");
-        return offer;
+            // Set user context for RLS
+            await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
+
+            const offer = await db.queryRow<Offer>`
+                SELECT o.*, u.name as user_name
+                FROM offer o
+                JOIN users u ON u.id = o.user_id
+                JOIN user_workspaces uw ON uw.workspace_id = o.workspace_id
+                WHERE o.id = ${id}
+                AND o.workspace_id = ${workspace_id}
+                AND (uw.user_id = ${userId} OR u.is_superuser)
+            `;
+
+            if (!offer) throw APIError.notFound("Offer not found or access denied");
+            return offer;
+        } catch (error) {
+            console.error("Error in get function:", error);
+            throw error;
+        }
     }
 );
 
@@ -63,19 +75,30 @@ export const listOffers = api(
     async (): Promise<{ offers: Offer[] }> => {
         await verifyAndSetUserContext();
 
-        const offers: Offer[] = [];
-        const rows = await db.query<Offer>`
-            SELECT o.*
-            FROM offer o
-            JOIN user_workspaces uw ON uw.workspace_id = o.workspace_id
-            JOIN users u ON u.id = uw.user_id
-            WHERE o.workspace_id = current_setting('app.workspace_id', true)
-            AND (uw.user_id = current_setting('app.user_id', true) OR u.is_superuser)
-            ORDER BY o.created_at DESC
-        `;
+        try {
+            const workspace_id = await checkWorkspaceContext();
+            const userId = await verifyToken();
 
-        for await (const row of rows) offers.push(row);
-        return { offers };
+            // Set user context for RLS
+            await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
+
+            const offers: Offer[] = [];
+            const rows = await db.query<Offer>`
+                SELECT o.*, u.name as user_name
+                FROM offer o
+                JOIN users u ON u.id = o.user_id
+                JOIN user_workspaces uw ON uw.workspace_id = o.workspace_id
+                WHERE o.workspace_id = ${workspace_id}
+                AND (uw.user_id = ${userId} OR u.is_superuser)
+                ORDER BY o.created_at DESC
+            `;
+
+            for await (const row of rows) offers.push(row);
+            return { offers };
+        } catch (error) {
+            console.error("Error in list function:", error);
+            throw error;
+        }
     }
 );
 

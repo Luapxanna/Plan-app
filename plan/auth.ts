@@ -328,3 +328,16 @@ export const getCurrentWorkspace = api(
         }
     }
 );
+
+// Helper function to check current workspace context
+export async function checkWorkspaceContext(): Promise<string> {
+    const result = await db.queryRow<{ workspace_id: string }>`
+    SELECT current_setting('app.workspace_id', false) as workspace_id
+  `;
+
+    if (!result || !result.workspace_id) {
+        throw APIError.invalidArgument("No workspace context set. Please set workspace context first.");
+    }
+
+    return result.workspace_id;
+}

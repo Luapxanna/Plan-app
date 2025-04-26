@@ -1,5 +1,5 @@
 import { api, APIError } from "encore.dev/api";
-import { verifyToken } from "./auth";
+import { verifyToken, checkWorkspaceContext } from "./auth";
 import { db } from "./db";
 
 interface Lead {
@@ -30,16 +30,30 @@ export const createLead = api(
     { expose: true, method: "POST", path: "/lead" },
     async ({ name, email, phone }: { name: string; email: string; phone: string }): Promise<Lead> => {
         await verifyAndSetUserContext();
-        const userId = await verifyToken();
 
-        const lead = await db.queryRow<Lead>`
-            INSERT INTO lead (name, workspace_id, user_id, email, phone)
-            VALUES (${name}, current_setting('app.workspace_id', true), ${userId}, ${email}, ${phone})
-            RETURNING *
-        `;
+        try {
+            const workspace_id = await checkWorkspaceContext();
+            const userId = await verifyToken();
 
-        if (!lead) throw APIError.internal("Failed to create lead");
-        return lead;
+            console.log("Creating lead with:", { name, email, phone, workspace_id, userId });
+
+            // First set the user context for RLS
+            await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
+
+            const result = await db.queryRow<Lead>`
+                INSERT INTO lead (name, workspace_id, user_id, email, phone)
+                VALUES (${name}, ${workspace_id}, ${userId}, ${email}, ${phone})
+                RETURNING id, name, workspace_id, user_id, email, phone, created_at
+            `;
+
+            console.log("Lead creation result:", result);
+
+            if (!result) throw APIError.internal("Failed to create lead");
+            return result;
+        } catch (error) {
+            console.error("Error in create function:", error);
+            throw error;
+        }
     }
 );
 
@@ -49,17 +63,29 @@ export const getLead = api(
     async ({ id }: { id: string }): Promise<Lead> => {
         await verifyAndSetUserContext();
 
-        const lead = await db.queryRow<Lead>`
-            SELECT l.*
-            FROM lead l
-            JOIN user_workspaces uw ON uw.workspace_id = l.workspace_id
-            JOIN users u ON u.id = uw.user_id
-            WHERE l.id = ${id}
-            AND (uw.user_id = current_setting('app.user_id', true) OR u.is_superuser)
-        `;
+        try {
+            const workspace_id = await checkWorkspaceContext();
+            const userId = await verifyToken();
 
-        if (!lead) throw APIError.notFound("Lead not found or access denied");
-        return lead;
+            // Set user context for RLS
+            await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
+
+            const lead = await db.queryRow<Lead>`
+                SELECT l.*
+                FROM lead l
+                JOIN user_workspaces uw ON uw.workspace_id = l.workspace_id
+                JOIN users u ON u.id = uw.user_id
+                WHERE l.id = ${id}
+                AND l.workspace_id = ${workspace_id}
+                AND (uw.user_id = ${userId} OR u.is_superuser)
+            `;
+
+            if (!lead) throw APIError.notFound("Lead not found or access denied");
+            return lead;
+        } catch (error) {
+            console.error("Error in get function:", error);
+            throw error;
+        }
     }
 );
 
@@ -69,19 +95,30 @@ export const listLeads = api(
     async (): Promise<{ leads: Lead[] }> => {
         await verifyAndSetUserContext();
 
-        const leads: Lead[] = [];
-        const rows = await db.query<Lead>`
-            SELECT l.*
-            FROM lead l
-            JOIN user_workspaces uw ON uw.workspace_id = l.workspace_id
-            JOIN users u ON u.id = uw.user_id
-            WHERE l.workspace_id = current_setting('app.workspace_id', true)
-            AND (uw.user_id = current_setting('app.user_id', true) OR u.is_superuser)
-            ORDER BY l.created_at DESC
-        `;
+        try {
+            const workspace_id = await checkWorkspaceContext();
+            const userId = await verifyToken();
 
-        for await (const row of rows) leads.push(row);
-        return { leads };
+            // Set user context for RLS
+            await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
+
+            const leads: Lead[] = [];
+            const rows = await db.query<Lead>`
+                SELECT l.*
+                FROM lead l
+                JOIN user_workspaces uw ON uw.workspace_id = l.workspace_id
+                JOIN users u ON u.id = uw.user_id
+                WHERE l.workspace_id = ${workspace_id}
+                AND (uw.user_id = ${userId} OR u.is_superuser)
+                ORDER BY l.created_at DESC
+            `;
+
+            for await (const row of rows) leads.push(row);
+            return { leads };
+        } catch (error) {
+            console.error("Error in list function:", error);
+            throw error;
+        }
     }
 );
 
@@ -91,27 +128,32 @@ export const removeLead = api(
     async ({ id }: { id: string }): Promise<void> => {
         await verifyAndSetUserContext();
 
-        const result = await db.queryRow<{ exists: boolean }>`
-            SELECT EXISTS (
-                SELECT 1 FROM lead l
-                JOIN user_workspaces uw ON uw.workspace_id = l.workspace_id
+        try {
+            const result = await db.queryRow<{ exists: boolean }>`
+                SELECT EXISTS (
+                    SELECT 1 FROM lead l
+                    JOIN user_workspaces uw ON uw.workspace_id = l.workspace_id
+                    JOIN users u ON u.id = uw.user_id
+                    WHERE l.id = ${id}
+                    AND (uw.user_id = current_setting('app.user_id', true) OR u.is_superuser)
+                ) as exists
+            `;
+
+            if (!result?.exists) {
+                throw APIError.notFound("Lead not found or access denied");
+            }
+
+            await db.exec`
+                DELETE FROM lead l
+                USING user_workspaces uw
                 JOIN users u ON u.id = uw.user_id
                 WHERE l.id = ${id}
+                AND l.workspace_id = uw.workspace_id
                 AND (uw.user_id = current_setting('app.user_id', true) OR u.is_superuser)
-            ) as exists
-        `;
-
-        if (!result?.exists) {
-            throw APIError.notFound("Lead not found or access denied");
+            `;
+        } catch (error) {
+            console.error("Error in delete function:", error);
+            throw error;
         }
-
-        await db.exec`
-            DELETE FROM lead l
-            USING user_workspaces uw
-            JOIN users u ON u.id = uw.user_id
-            WHERE l.id = ${id}
-            AND l.workspace_id = uw.workspace_id
-            AND (uw.user_id = current_setting('app.user_id', true) OR u.is_superuser)
-        `;
     }
 );
