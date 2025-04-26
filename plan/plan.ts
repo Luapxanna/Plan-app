@@ -19,8 +19,8 @@ interface Plan {
   workspace_id: string;
 }
 
-interface ListResponse<T> {
-  [key: string]: T[];
+interface ListPlansResponse {
+  plans: Plan[];
 }
 
 interface User {
@@ -29,31 +29,41 @@ interface User {
   is_superuser: boolean;
 }
 
+interface ListWorkspacesResponse {
+  workspaces: Workspace[];
+}
+
+interface ListUsersResponse {
+  users: User[];
+}
+
 // Helper function to verify token and set user context
 async function verifyAndSetUserContext(): Promise<void> {
   const userId = await verifyToken();
-  if (!userId) throw APIError.unauthenticated("No active session");
+  if (!userId) {
+    throw APIError.unauthenticated("No active session. Please login first.");
+  }
+
+  // Set user context
   await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
 
-  const workspace = await db.queryRow<{ id: string }>`
-    SELECT workspace_id as id FROM user_workspaces 
-    WHERE user_id = ${userId} LIMIT 1
+  // Get user's first workspace if not set
+  const currentWorkspace = await db.queryRow<{ workspace_id: string }>`
+      SELECT current_setting('app.workspace_id', true) as workspace_id
   `;
 
-  if (workspace) {
-    await db.exec`SELECT set_config('app.workspace_id', ${workspace.id}, false)`;
-  }
-}
+  if (!currentWorkspace?.workspace_id) {
+    const workspace = await db.queryRow<{ id: string }>`
+        SELECT workspace_id as id
+        FROM user_workspaces
+        WHERE user_id = ${userId}
+        LIMIT 1
+    `;
 
-// Helper function to check current workspace context
-async function checkWorkspaceContext(): Promise<string> {
-  const result = await db.queryRow<{ workspace_id: string }>`
-    SELECT current_setting('app.workspace_id', false) as workspace_id
-  `;
-  if (!result?.workspace_id) {
-    throw APIError.invalidArgument("No workspace context set");
+    if (workspace) {
+      await db.exec`SELECT set_config('app.workspace_id', ${workspace.id}, false)`;
+    }
   }
-  return result.workspace_id;
 }
 
 // GetCurrentWorkspace returns the current workspace based on the workspace_id setting
@@ -124,12 +134,15 @@ export const create = api(
     const workspace_id = await checkWorkspaceContext();
 
     const plan = await db.queryRow<Plan>`
-      INSERT INTO plan (name, workspace_id)
-      VALUES (${name}, ${workspace_id})
-      RETURNING id, name, workspace_id
-    `;
+            INSERT INTO plan (name, workspace_id)
+            VALUES (${name}, ${workspace_id})
+            RETURNING id, name, workspace_id
+        `;
 
-    if (!plan) throw APIError.internal("Failed to create plan");
+    if (!plan) {
+      throw APIError.internal("Failed to create plan");
+    }
+
     return plan;
   }
 );
@@ -141,13 +154,16 @@ export const get = api(
     await verifyAndSetUserContext();
 
     const plan = await db.queryRow<Plan>`
-      SELECT p.id, p.name, p.workspace_id
-      FROM plan p
-      JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
-      WHERE p.id = ${id} AND uw.user_id = current_setting('app.user_id', true)
-    `;
+            SELECT p.id, p.name, p.workspace_id
+            FROM plan p
+            JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
+            WHERE p.id = ${id} AND uw.user_id = current_setting('app.user_id', true)
+        `;
 
-    if (!plan) throw APIError.notFound("Plan not found or access denied");
+    if (!plan) {
+      throw APIError.notFound("Plan not found or access denied");
+    }
+
     return plan;
   }
 );
@@ -158,18 +174,21 @@ export const update = api(
   async ({ id, name }: { id: string; name: string }): Promise<Plan> => {
     await verifyAndSetUserContext();
 
-    const plan = await db.queryRow<Plan>`
-      UPDATE plan p
-      SET name = ${name}
-      FROM user_workspaces uw
-      WHERE p.id = ${id}
-        AND p.workspace_id = uw.workspace_id 
-        AND uw.user_id = current_setting('app.user_id', true)
-      RETURNING p.id, p.name, p.workspace_id
-    `;
+    const updatedPlan = await db.queryRow<Plan>`
+            UPDATE plan p
+            SET name = ${name}
+            FROM user_workspaces uw
+            WHERE p.id = ${id}
+                AND p.workspace_id = uw.workspace_id 
+                AND uw.user_id = current_setting('app.user_id', true)
+            RETURNING p.id, p.name, p.workspace_id
+        `;
 
-    if (!plan) throw APIError.notFound("Plan not found or access denied");
-    return plan;
+    if (!updatedPlan) {
+      throw APIError.notFound("Plan not found or access denied");
+    }
+
+    return updatedPlan;
   }
 );
 
@@ -179,44 +198,68 @@ export const remove = api(
   async ({ id }: { id: string }): Promise<void> => {
     await verifyAndSetUserContext();
 
-    const exists = await db.queryRow<{ exists: boolean }>`
-      SELECT EXISTS (
-        SELECT 1 FROM plan p
-        JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
-        WHERE p.id = ${id} AND uw.user_id = current_setting('app.user_id', true)
-      ) as exists
-    `;
+    const result = await db.queryRow<{ exists: boolean }>`
+            SELECT EXISTS (
+                SELECT 1 FROM plan p
+                JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
+                WHERE p.id = ${id} AND uw.user_id = current_setting('app.user_id', true)
+            ) as exists
+        `;
 
-    if (!exists?.exists) throw APIError.notFound("Plan not found or access denied");
+    if (!result?.exists) {
+      throw APIError.notFound("Plan not found or access denied");
+    }
 
     await db.exec`
-      DELETE FROM plan p
-      USING user_workspaces uw
-      WHERE p.id = ${id}
-        AND p.workspace_id = uw.workspace_id 
-        AND uw.user_id = current_setting('app.user_id', true)
-    `;
+            DELETE FROM plan p
+            USING user_workspaces uw
+            WHERE p.id = ${id}
+                AND p.workspace_id = uw.workspace_id 
+                AND uw.user_id = current_setting('app.user_id', true)
+        `;
   }
 );
+
+// Helper function to check current workspace context
+async function checkWorkspaceContext(): Promise<string> {
+  const result = await db.queryRow<{ workspace_id: string }>`
+    SELECT current_setting('app.workspace_id', false) as workspace_id
+  `;
+
+  if (!result || !result.workspace_id) {
+    throw APIError.invalidArgument("No workspace context set. Please set workspace context first.");
+  }
+
+  return result.workspace_id;
+}
 
 // List all plans in a workspace
 export const list = api(
   { expose: true, method: "GET", path: "/plan" },
-  async (): Promise<ListResponse<Plan>> => {
+  async (): Promise<ListPlansResponse> => {
     await verifyAndSetUserContext();
-    const workspace_id = await checkWorkspaceContext();
 
-    const plans: Plan[] = [];
-    const rows = await db.query<Plan>`
-      SELECT p.id, p.name, p.workspace_id
-      FROM plan p
-      JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
-      WHERE p.workspace_id = ${workspace_id}
-        AND uw.user_id = current_setting('app.user_id', true)
-    `;
+    try {
+      const workspace_id = await checkWorkspaceContext();
 
-    for await (const row of rows) plans.push(row);
-    return { plans };
+      const plans: Plan[] = [];
+      const rows = db.query<Plan>`
+                SELECT p.id, p.name, p.workspace_id
+                FROM plan p
+                JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
+                WHERE p.workspace_id = ${workspace_id}
+                    AND uw.user_id = current_setting('app.user_id', true)
+            `;
+
+      for await (const row of rows) {
+        plans.push(row);
+      }
+
+      return { plans };
+    } catch (error) {
+      console.error("Error in list function:", error);
+      throw error;
+    }
   }
 );
 
@@ -261,42 +304,61 @@ export const insertTestData = api(
   }
 );
 
-// List all workspaces for the current user
+// Get all workspaces for the current user
 export const listWorkspaces = api(
   { expose: true, method: "GET", path: "/workspace" },
-  async (): Promise<ListResponse<Workspace>> => {
+  async (): Promise<ListWorkspacesResponse> => {
     await verifyAndSetUserContext();
 
     const workspaces: Workspace[] = [];
-    const rows = await db.query<Workspace>`
+    const rows = db.query<Workspace>`
       WITH active_user AS (
-        SELECT id, is_superuser FROM users 
+        SELECT id, is_superuser 
+        FROM users 
         WHERE id = current_setting('app.user_id', true)
       )
       SELECT DISTINCT w.id, w.name, w.created_at,
-        (SELECT COUNT(*) FROM user_workspaces WHERE workspace_id = w.id) as member_count
+             (SELECT COUNT(*) FROM user_workspaces WHERE workspace_id = w.id) as member_count
       FROM workspace w
       LEFT JOIN user_workspaces uw ON w.id = uw.workspace_id
-      WHERE EXISTS (SELECT 1 FROM active_user WHERE is_superuser = true)
-        OR uw.user_id = (SELECT id FROM active_user)
+      WHERE EXISTS (
+        SELECT 1 FROM active_user
+        WHERE is_superuser = true
+      )
+      OR uw.user_id = (SELECT id FROM active_user)
       ORDER BY w.name
     `;
 
-    for await (const row of rows) workspaces.push(row);
+    for await (const row of rows) {
+      workspaces.push(row);
+    }
+
     return { workspaces };
   }
 );
 
-// Workspace access management
+// Grant workspace access to a user
 export const grantWorkspaceAccess = api(
   { expose: true, method: "POST", path: "/workspace/:workspace_id/grant/:user_id" },
   async ({ workspace_id, user_id }: { workspace_id: string; user_id: string }): Promise<void> => {
     await verifyAndSetUserContext();
-    const isSuperuser = await db.queryRow<{ is_superuser: boolean }>`
-      SELECT is_superuser FROM users WHERE id = current_setting('app.user_id', true)
+    const currentUserId = await db.queryRow<{ user_id: string }>`
+      SELECT current_setting('app.user_id', true) as user_id
     `;
 
-    if (!isSuperuser?.is_superuser) throw APIError.permissionDenied("Only superusers can grant access");
+    if (!currentUserId?.user_id) {
+      throw APIError.notFound("User not found");
+    }
+
+    const isSuperuser = await db.queryRow<{ is_superuser: boolean }>`
+      SELECT is_superuser
+      FROM users
+      WHERE id = ${currentUserId.user_id}
+    `;
+
+    if (!isSuperuser?.is_superuser) {
+      throw APIError.permissionDenied("Only superusers can grant workspace access");
+    }
 
     await db.exec`
       INSERT INTO user_workspaces (user_id, workspace_id)
@@ -306,15 +368,28 @@ export const grantWorkspaceAccess = api(
   }
 );
 
+// Revoke workspace access from a user
 export const revokeWorkspaceAccess = api(
   { expose: true, method: "POST", path: "/workspace/:workspace_id/revoke/:user_id" },
   async ({ workspace_id, user_id }: { workspace_id: string; user_id: string }): Promise<void> => {
     await verifyAndSetUserContext();
-    const isSuperuser = await db.queryRow<{ is_superuser: boolean }>`
-      SELECT is_superuser FROM users WHERE id = current_setting('app.user_id', true)
+    const currentUserId = await db.queryRow<{ user_id: string }>`
+      SELECT current_setting('app.user_id', true) as user_id
     `;
 
-    if (!isSuperuser?.is_superuser) throw APIError.permissionDenied("Only superusers can revoke access");
+    if (!currentUserId?.user_id) {
+      throw APIError.notFound("User not found");
+    }
+
+    const isSuperuser = await db.queryRow<{ is_superuser: boolean }>`
+      SELECT is_superuser
+      FROM users
+      WHERE id = ${currentUserId.user_id}
+    `;
+
+    if (!isSuperuser?.is_superuser) {
+      throw APIError.permissionDenied("Only superusers can revoke workspace access");
+    }
 
     await db.exec`
       DELETE FROM user_workspaces
@@ -323,15 +398,28 @@ export const revokeWorkspaceAccess = api(
   }
 );
 
+// Get users with access to a workspace
 export const getWorkspaceUsers = api(
   { expose: true, method: "GET", path: "/workspace/:workspace_id/users" },
-  async ({ workspace_id }: { workspace_id: string }): Promise<ListResponse<User>> => {
+  async ({ workspace_id }: { workspace_id: string }): Promise<ListUsersResponse> => {
     await verifyAndSetUserContext();
-    const isSuperuser = await db.queryRow<{ is_superuser: boolean }>`
-      SELECT is_superuser FROM users WHERE id = current_setting('app.user_id', true)
+    const currentUserId = await db.queryRow<{ user_id: string }>`
+      SELECT current_setting('app.user_id', true) as user_id
     `;
 
-    if (!isSuperuser?.is_superuser) throw APIError.permissionDenied("Only superusers can view users");
+    if (!currentUserId?.user_id) {
+      throw APIError.notFound("User not found");
+    }
+
+    const isSuperuser = await db.queryRow<{ is_superuser: boolean }>`
+      SELECT is_superuser
+      FROM users
+      WHERE id = ${currentUserId.user_id}
+    `;
+
+    if (!isSuperuser?.is_superuser) {
+      throw APIError.permissionDenied("Only superusers can view workspace users");
+    }
 
     const users: User[] = [];
     const rows = await db.query<User>`
@@ -340,8 +428,9 @@ export const getWorkspaceUsers = api(
       JOIN user_workspaces uw ON uw.user_id = u.id
       WHERE uw.workspace_id = ${workspace_id}::uuid
     `;
-
-    for await (const row of rows) users.push(row);
+    for await (const row of rows) {
+      users.push(row);
+    }
     return { users };
   }
 );
