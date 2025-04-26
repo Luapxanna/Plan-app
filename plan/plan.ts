@@ -1,9 +1,8 @@
 import { api, APIError } from "encore.dev/api";
-import { SQLDatabase } from "encore.dev/storage/sqldb";
 import { verifyToken } from "./auth";
+import { db } from "./db";
 
 // 'plan' database is used to store the plans
-const db = new SQLDatabase("plan", { migrations: "./migrations" });
 
 interface Workspace {
   id: string;
@@ -127,7 +126,7 @@ export const changeCurrentWorkspace = api(
 );
 
 // Create a new plan
-export const create = api(
+export const createPlan = api(
   { expose: true, method: "POST", path: "/plan" },
   async ({ name }: { name: string }): Promise<Plan> => {
     await verifyAndSetUserContext();
@@ -148,7 +147,7 @@ export const create = api(
 );
 
 // Get a plan by ID
-export const get = api(
+export const getPlan = api(
   { expose: true, method: "GET", path: "/plan/:id" },
   async ({ id }: { id: string }): Promise<Plan> => {
     await verifyAndSetUserContext();
@@ -169,7 +168,7 @@ export const get = api(
 );
 
 // Update a plan
-export const update = api(
+export const updatePlan = api(
   { expose: true, method: "PUT", path: "/plan/:id" },
   async ({ id, name }: { id: string; name: string }): Promise<Plan> => {
     await verifyAndSetUserContext();
@@ -193,7 +192,7 @@ export const update = api(
 );
 
 // Delete a plan
-export const remove = api(
+export const removePlan = api(
   { expose: true, method: "DELETE", path: "/plan/:id" },
   async ({ id }: { id: string }): Promise<void> => {
     await verifyAndSetUserContext();
@@ -234,7 +233,7 @@ async function checkWorkspaceContext(): Promise<string> {
 }
 
 // List all plans in a workspace
-export const list = api(
+export const listPlans = api(
   { expose: true, method: "GET", path: "/plan" },
   async (): Promise<ListPlansResponse> => {
     await verifyAndSetUserContext();

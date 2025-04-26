@@ -1,5 +1,4 @@
-import { Pool } from "pg";
+import { SQLDatabase } from "encore.dev/storage/sqldb";
 
-export const db = new Pool({
-    connectionString: process.env.DATABASE_URL,
-}); 
+// Create a single shared database instance
+export const db = new SQLDatabase("plan", { migrations: "./migrations" }); 

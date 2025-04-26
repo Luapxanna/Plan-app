@@ -1,9 +1,7 @@
 import { api, APIError } from "encore.dev/api";
-import { SQLDatabase } from "encore.dev/storage/sqldb";
 import LogtoClient from '@logto/node';
 import { LogtoConfig } from '@logto/node';
-
-const db = new SQLDatabase("plan", { migrations: "./migrations" });
+import { db } from "./db";
 
 // Logto configuration
 const logtoConfig: LogtoConfig = {
@@ -88,6 +86,14 @@ interface LogtoUser {
 
 interface TokenResponse {
     access_token: string;
+}
+
+interface Workspace {
+    id: string;
+    name: string;
+    created_by: string;
+    created_at: Date;
+    member_count: number;
 }
 
 // Login endpoint
@@ -293,3 +299,32 @@ export const verifyToken = async (): Promise<string> => {
         throw error instanceof APIError ? error : APIError.unauthenticated("Authentication failed");
     }
 };
+
+// Get current workspace
+export const getCurrentWorkspace = api(
+    { expose: true, method: "GET", path: "/auth/workspace" },
+    async (): Promise<Workspace> => {
+        try {
+            const userId = await verifyToken();
+            if (!userId) {
+                throw APIError.unauthenticated("No active session. Please login first.");
+            }
+
+            const workspace = await db.queryRow<Workspace>`
+                SELECT w.*, 
+                       (SELECT COUNT(*) FROM user_workspaces WHERE workspace_id = w.id) as member_count
+                FROM workspace w
+                WHERE w.id = current_setting('app.workspace_id', true)
+            `;
+
+            if (!workspace) {
+                throw APIError.notFound("Workspace not found");
+            }
+
+            return workspace;
+        } catch (error) {
+            console.error('Get current workspace error:', error);
+            throw error instanceof APIError ? error : APIError.internal("Failed to get current workspace");
+        }
+    }
+);
