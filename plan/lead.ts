@@ -1,8 +1,9 @@
 import { api, APIError } from "encore.dev/api";
 import { verifyToken, checkWorkspaceContext } from "./auth";
 import { db } from "./db";
+import { sendLeadToQueue } from "./Leadworker";
 
-interface Lead {
+export interface Lead {
     id: string;
     workspace_id: string;
     user_id: string;
@@ -49,6 +50,15 @@ export const createLead = api(
             console.log("Lead creation result:", result);
 
             if (!result) throw APIError.internal("Failed to create lead");
+
+            // Send the new lead to the queue for processing
+            try {
+                await sendLeadToQueue(result);
+            } catch (error) {
+                console.error("Error sending lead to queue:", error);
+                // Don't throw the error - we want the lead creation to succeed even if queue processing fails
+            }
+
             return result;
         } catch (error) {
             console.error("Error in create function:", error);
