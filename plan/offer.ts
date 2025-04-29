@@ -3,6 +3,7 @@ import { verifyToken, checkWorkspaceContext } from "./auth";
 import { db } from "./db";
 import { logQuoteEvent } from "./quote_analytic";
 import { convertLeadToCustomer } from "./lead";
+import { sendQuote } from "./quote";
 
 export type OfferStatus = 'draft' | 'sent' | 'accepted' | 'rejected' | 'expired';
 
@@ -258,6 +259,13 @@ export const updateOfferStatus = api(
 
                 // Convert the lead to a customer
                 await convertLeadToCustomer({ id: offer.lead_id, notes: "Converted from accepted offer" });
+
+                // Automatically send the quote
+                await sendQuote({
+                    quote_id: id,
+                    ip_address: 'system', // Mark as system-generated
+                    user_agent: 'system'  // Mark as system-generated
+                });
             }
 
             return result;

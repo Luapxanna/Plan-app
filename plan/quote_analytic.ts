@@ -48,7 +48,8 @@ interface ClickHouseStats {
     status_counts: [string, string][];
     user_counts: [string, string][];
     lead_counts: [string, string][];
-    conversion_rate: string;
+    accepted_count: string;
+    total_count: string;
     avg_response_time: string;
     first_quote: string;
     last_quote: string;
@@ -130,7 +131,7 @@ export const getQuoteStats = api(
                 SELECT 
                     countIf(event_type = 'accepted') as accepted_count,
                     count() as total_count,
-                    avg(metadata.response_time) as avg_response_time
+                    avg(JSONExtractFloat(metadata, 'response_time')) as avg_response_time
                 FROM quote_analytics
                 WHERE workspace_id = '${params.workspace_id}'
             ),
@@ -146,11 +147,15 @@ export const getQuoteStats = api(
                 groupArray((status, count)) as status_counts,
                 groupArray((user_id, count)) as user_counts,
                 groupArray((lead_id, count)) as lead_counts,
-                (accepted_count / total_count) * 100 as conversion_rate,
-                avg_response_time,
-                first_quote,
-                last_quote
-            FROM quote_counts, conversion_stats, time_stats
+                any(conversion_stats.accepted_count) as accepted_count,
+                any(conversion_stats.total_count) as total_count,
+                any(conversion_stats.avg_response_time) as avg_response_time,
+                any(time_stats.first_quote) as first_quote,
+                any(time_stats.last_quote) as last_quote
+            FROM quote_counts
+            CROSS JOIN conversion_stats
+            CROSS JOIN time_stats
+            GROUP BY status, user_id, lead_id
             FORMAT JSON
         `;
 
@@ -174,12 +179,16 @@ export const getQuoteStats = api(
             quotes_by_lead[lead_id] = Number(count);
         });
 
+        const conversion_rate = Number(stats.total_count) > 0
+            ? (Number(stats.accepted_count) / Number(stats.total_count)) * 100
+            : 0;
+
         return {
             total_quotes: Number(stats.total_quotes) || 0,
             quotes_by_status,
             quotes_by_user,
             quotes_by_lead,
-            conversion_rate: Number(stats.conversion_rate) || 0,
+            conversion_rate,
             average_response_time: Number(stats.avg_response_time) || 0,
             first_quote_at: stats.first_quote,
             last_quote_at: stats.last_quote

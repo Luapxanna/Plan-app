@@ -31,8 +31,6 @@ export interface Customer {
     conversion_date: Date;
     first_purchase_date?: Date;
     last_purchase_date?: Date;
-    total_purchases: number;
-    total_spent: number;
     status: string;
     notes?: string;
     created_at: Date;
