@@ -79,6 +79,7 @@ async function pollQueue() {
                 MaxNumberOfMessages: BATCH_SIZE,
                 WaitTimeSeconds: 20, // Long polling to reduce API calls
                 VisibilityTimeout: VISIBILITY_TIMEOUT,
+                MessageAttributeNames: ['All'] // Include message attributes for retry logic
             });
 
             apiCalls++;
@@ -87,28 +88,8 @@ async function pollQueue() {
             if (response.Messages && response.Messages.length > 0) {
                 console.log(`Processing batch of ${response.Messages.length} messages`);
 
-                // Process messages in parallel
-                await Promise.all(response.Messages.map(async (message) => {
-                    if (!message.Body || !message.ReceiptHandle) {
-                        console.error("Invalid message format:", message);
-                        return;
-                    }
-
-                    try {
-                        const lead = JSON.parse(message.Body) as Lead;
-                        await handleLeadNew(lead);
-
-                        // Delete processed message
-                        const deleteCommand = new DeleteMessageCommand({
-                            QueueUrl: queueUrl,
-                            ReceiptHandle: message.ReceiptHandle,
-                        });
-                        apiCalls++;
-                        await sqs.send(deleteCommand);
-                    } catch (error) {
-                        console.error("Error processing message:", error);
-                    }
-                }));
+                // Process messages in parallel using the processMessage function
+                await Promise.all(response.Messages.map(processMessage));
             }
 
             // Log API usage periodically
@@ -162,7 +143,9 @@ export const sendTestEvent = api(
                 name: "Test Lead",
                 email: "test@example.com",
                 phone: "1234567890",
-                created_at: new Date()
+                status: "new",
+                created_at: new Date(),
+                updated_at: new Date()
             };
 
             // Send to main queue with retry attributes
@@ -172,7 +155,7 @@ export const sendTestEvent = api(
                 MessageAttributes: {
                     RetryCount: {
                         DataType: 'Number',
-                        StringValue: '0'
+                        StringValue: '2' // Start with 2 retries so it will move to DLQ on first failure
                     },
                     ShouldFail: {
                         DataType: 'String',
@@ -184,7 +167,7 @@ export const sendTestEvent = api(
             await sqs.send(command);
             return {
                 message: shouldFail
-                    ? "Test event sent to main queue (will fail and retry)"
+                    ? "Test event sent to main queue (will fail and move to DLQ)"
                     : "Test event sent successfully"
             };
         } catch (error) {

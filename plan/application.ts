@@ -2,12 +2,18 @@ import { api, APIError } from "encore.dev/api";
 import { verifyToken, checkWorkspaceContext } from "./auth";
 import { db } from "./db";
 
-interface Application {
+export type ApplicationStatus = 'pending' | 'reviewing' | 'approved' | 'rejected';
+
+export interface Application {
     id: string;
     workspace_id: string;
     user_id: string;
     lead_id: string;
+    plan_id: string;
+    status: ApplicationStatus;
+    notes?: string;
     created_at: Date;
+    updated_at: Date;
 }
 
 interface ListResponse<T> {
@@ -26,20 +32,67 @@ async function verifyAndSetUserContext(): Promise<void> {
 // Create a new application
 export const createApplication = api(
     { expose: true, method: "POST", path: "/application" },
-    async ({ lead_id }: { lead_id: string }): Promise<Application> => {
+    async ({
+        lead_id,
+        plan_id
+    }: {
+        lead_id: string;
+        plan_id: string;
+    }): Promise<Application> => {
         await verifyAndSetUserContext();
 
         try {
             const workspace_id = await checkWorkspaceContext();
             const userId = await verifyToken();
 
+            // Verify lead exists and belongs to workspace
+            const leadExists = await db.queryRow<{ exists: boolean }>`
+                SELECT EXISTS (
+                    SELECT 1 FROM lead
+                    WHERE id = ${lead_id}
+                    AND workspace_id = ${workspace_id}
+                ) as exists
+            `;
+
+            if (!leadExists?.exists) {
+                throw APIError.notFound("Lead not found");
+            }
+
+            // Verify plan exists and belongs to workspace
+            const planExists = await db.queryRow<{ exists: boolean }>`
+                SELECT EXISTS (
+                    SELECT 1 FROM plan
+                    WHERE id = ${plan_id}
+                    AND workspace_id = ${workspace_id}
+                ) as exists
+            `;
+
+            if (!planExists?.exists) {
+                throw APIError.notFound("Plan not found");
+            }
+
             const application = await db.queryRow<Application>`
-                INSERT INTO application (lead_id, workspace_id, user_id)
-                VALUES (${lead_id}, ${workspace_id}, ${userId})
+                INSERT INTO application (
+                    lead_id, workspace_id, user_id, plan_id,
+                    status, created_at, updated_at
+                )
+                VALUES (
+                    ${lead_id}, ${workspace_id}, ${userId}, ${plan_id},
+                    'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
                 RETURNING *
             `;
 
             if (!application) throw APIError.internal("Failed to create application");
+
+            // Update lead status to indicate application received
+            await db.exec`
+                UPDATE lead
+                SET status = 'qualified',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ${lead_id}
+            `;
+
             return application;
         } catch (error) {
             console.error("Error in create function:", error);
@@ -144,6 +197,38 @@ export const removeApplication = api(
             `;
         } catch (error) {
             console.error("Error in delete function:", error);
+            throw error;
+        }
+    }
+);
+
+// Update application status
+export const updateApplicationStatus = api(
+    { expose: true, method: "PUT", path: "/application/:id/status" },
+    async ({ id, status, notes }: { id: string; status: ApplicationStatus; notes?: string }): Promise<Application> => {
+        await verifyAndSetUserContext();
+
+        try {
+            const workspace_id = await checkWorkspaceContext();
+            const userId = await verifyToken();
+
+            await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
+
+            const result = await db.queryRow<Application>`
+                UPDATE application
+                SET 
+                    status = ${status},
+                    notes = COALESCE(${notes}, notes),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ${id}
+                AND workspace_id = ${workspace_id}
+                RETURNING *
+            `;
+
+            if (!result) throw APIError.notFound("Application not found or access denied");
+            return result;
+        } catch (error) {
+            console.error("Error updating application status:", error);
             throw error;
         }
     }

@@ -3,6 +3,8 @@ import { verifyToken, checkWorkspaceContext } from "./auth";
 import { db } from "./db";
 import { sendLeadToQueue } from "./Leadworker";
 
+export type LeadStatus = 'new' | 'contacted' | 'qualified' | 'converted' | 'lost';
+
 export interface Lead {
     id: string;
     workspace_id: string;
@@ -10,7 +12,31 @@ export interface Lead {
     name: string;
     email: string;
     phone: string;
+    status: LeadStatus;
+    source?: string;
+    notes?: string;
     created_at: Date;
+    updated_at: Date;
+}
+
+export interface Customer {
+    id: string;
+    workspace_id: string;
+    lead_id: string;
+    user_id: string;
+    name: string;
+    email: string;
+    phone: string;
+    source?: string;
+    conversion_date: Date;
+    first_purchase_date?: Date;
+    last_purchase_date?: Date;
+    total_purchases: number;
+    total_spent: number;
+    status: string;
+    notes?: string;
+    created_at: Date;
+    updated_at: Date;
 }
 
 interface ListResponse<T> {
@@ -29,7 +55,7 @@ async function verifyAndSetUserContext(): Promise<void> {
 // Create a new lead
 export const createLead = api(
     { expose: true, method: "POST", path: "/lead" },
-    async ({ name, email, phone }: { name: string; email: string; phone: string }): Promise<Lead> => {
+    async ({ name, email, phone, source }: { name: string; email: string; phone: string; source?: string }): Promise<Lead> => {
         await verifyAndSetUserContext();
 
         try {
@@ -42,9 +68,15 @@ export const createLead = api(
             await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
 
             const result = await db.queryRow<Lead>`
-                INSERT INTO lead (name, workspace_id, user_id, email, phone)
-                VALUES (${name}, ${workspace_id}, ${userId}, ${email}, ${phone})
-                RETURNING id, name, workspace_id, user_id, email, phone, created_at
+                INSERT INTO lead (
+                    name, workspace_id, user_id, email, phone, 
+                    status, source, created_at, updated_at
+                )
+                VALUES (
+                    ${name}, ${workspace_id}, ${userId}, ${email}, ${phone},
+                    'new', ${source}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                RETURNING *
             `;
 
             console.log("Lead creation result:", result);
@@ -163,6 +195,113 @@ export const removeLead = api(
             `;
         } catch (error) {
             console.error("Error in delete function:", error);
+            throw error;
+        }
+    }
+);
+
+// Update lead status
+export const updateLeadStatus = api(
+    { expose: true, method: "PUT", path: "/lead/:id/status" },
+    async ({ id, status, notes }: { id: string; status: LeadStatus; notes?: string }): Promise<Lead> => {
+        await verifyAndSetUserContext();
+
+        try {
+            const workspace_id = await checkWorkspaceContext();
+            const userId = await verifyToken();
+
+            await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
+
+            const result = await db.queryRow<Lead>`
+                UPDATE lead
+                SET 
+                    status = ${status},
+                    notes = COALESCE(${notes}, notes),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ${id}
+                AND workspace_id = ${workspace_id}
+                RETURNING *
+            `;
+
+            if (!result) throw APIError.notFound("Lead not found or access denied");
+            return result;
+        } catch (error) {
+            console.error("Error updating lead status:", error);
+            throw error;
+        }
+    }
+);
+
+// Convert a lead to a customer
+export const convertLeadToCustomer = api(
+    { expose: true, method: "POST", path: "/lead/:id/convert" },
+    async ({ id, notes }: { id: string; notes?: string }): Promise<Customer> => {
+        await verifyAndSetUserContext();
+
+        try {
+            const workspace_id = await checkWorkspaceContext();
+            const userId = await verifyToken();
+
+            // Get the lead details
+            const lead = await db.queryRow<Lead>`
+                SELECT * FROM lead
+                WHERE id = ${id}
+                AND workspace_id = ${workspace_id}
+                AND status = 'converted'
+            `;
+
+            if (!lead) {
+                throw APIError.notFound("Lead not found or not ready for conversion");
+            }
+
+            // Create the customer record
+            const customer = await db.queryRow<Customer>`
+                INSERT INTO customer (
+                    workspace_id,
+                    lead_id,
+                    user_id,
+                    name,
+                    email,
+                    phone,
+                    source,
+                    conversion_date,
+                    first_purchase_date,
+                    notes,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    ${workspace_id},
+                    ${lead.id},
+                    ${lead.user_id},
+                    ${lead.name},
+                    ${lead.email},
+                    ${lead.phone},
+                    ${lead.source},
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP,
+                    ${notes},
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP
+                )
+                RETURNING *
+            `;
+
+            if (!customer) {
+                throw APIError.internal("Failed to convert lead to customer");
+            }
+
+            // Update lead status to indicate it's been converted to customer
+            await db.exec`
+                UPDATE lead
+                SET status = 'customer',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ${id}
+            `;
+
+            return customer;
+        } catch (error) {
+            console.error("Error converting lead to customer:", error);
             throw error;
         }
     }

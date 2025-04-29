@@ -244,12 +244,15 @@ export const listPlans = api(
 
       const plans: Plan[] = [];
       const rows = await db.query<Plan>`
-        SELECT p.*, u.name as user_name
+        SELECT p.*
         FROM plan p
-        JOIN users u ON u.id = p.user_id
         JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
         WHERE p.workspace_id = ${workspace_id}
-        AND (uw.user_id = ${userId} OR u.is_superuser)
+        AND (uw.user_id = ${userId} OR EXISTS (
+          SELECT 1 FROM users u
+          WHERE u.id = ${userId}
+          AND u.is_superuser = true
+        ))
         ORDER BY p.created_at DESC
       `;
 
@@ -259,47 +262,6 @@ export const listPlans = api(
       console.error("Error in list function:", error);
       throw error;
     }
-  }
-);
-
-// Insert test data
-export const insertTestData = api(
-  { expose: true, method: "POST", path: "/test-data" },
-  async (): Promise<void> => {
-    await verifyAndSetUserContext();
-
-    // Insert test workspaces
-    await db.exec`
-            INSERT INTO workspace (id, name) VALUES
-                ('11111111-1111-1111-1111-111111111111'::uuid, 'Development Team'),
-                ('22222222-2222-2222-2222-222222222222'::uuid, 'Marketing Team'),
-                ('33333333-3333-3333-3333-333333333333'::uuid, 'Sales Team')
-            ON CONFLICT (id) DO NOTHING;
-        `;
-
-    // Insert test plans for Development Team
-    await db.exec`
-            INSERT INTO plan (id, name, workspace_id) VALUES
-                ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::uuid, 'Q1 Development Goals', '11111111-1111-1111-1111-111111111111'::uuid),
-                ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'::uuid, 'Product Launch Plan', '11111111-1111-1111-1111-111111111111'::uuid)
-            ON CONFLICT (id) DO NOTHING;
-        `;
-
-    // Insert test plans for Marketing Team
-    await db.exec`
-            INSERT INTO plan (id, name, workspace_id) VALUES
-                ('cccccccc-cccc-cccc-cccc-cccccccccccc'::uuid, 'Social Media Strategy', '22222222-2222-2222-2222-222222222222'::uuid),
-                ('dddddddd-dddd-dddd-dddd-dddddddddddd'::uuid, 'Content Calendar', '22222222-2222-2222-2222-222222222222'::uuid)
-            ON CONFLICT (id) DO NOTHING;
-        `;
-
-    // Insert test plans for Sales Team
-    await db.exec`
-            INSERT INTO plan (id, name, workspace_id) VALUES
-                ('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'::uuid, 'Sales Pipeline', '33333333-3333-3333-3333-333333333333'::uuid),
-                ('ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid, 'Customer Success Plan', '33333333-3333-3333-3333-333333333333'::uuid)
-            ON CONFLICT (id) DO NOTHING;
-        `;
   }
 );
 
