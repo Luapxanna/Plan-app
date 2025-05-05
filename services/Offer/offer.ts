@@ -1,9 +1,9 @@
 import { api, APIError } from "encore.dev/api";
-import { verifyToken, checkWorkspaceContext } from "./auth";
-import { db } from "./db";
-import { logQuoteEvent } from "./quote_analytic";
-import { convertLeadToCustomer } from "./lead";
-import { sendQuote } from "./quote";
+import { verifyToken, checkWorkspaceContext } from "../Auth/auth";
+import { db } from "../db";
+import { logQuoteEvent } from "../Quote/quote_analytic";
+import { convertLeadToCustomer } from "../Lead/lead";
+import { sendQuote } from "../Quote/quote";
 
 export type OfferStatus = 'draft' | 'sent' | 'accepted' | 'rejected' | 'expired';
 
@@ -132,30 +132,30 @@ export const listOffers = api(
     async (): Promise<{ offers: Offer[] }> => {
         await verifyAndSetUserContext();
 
-        try {
-            const workspace_id = await checkWorkspaceContext();
-            const userId = await verifyToken();
+        const offers: Offer[] = [];
+        const rows = await db.query<Offer>`
+            WITH active_user AS (
+                SELECT id, is_superuser 
+                FROM users 
+                WHERE id = current_setting('app.user_id', true)
+            )
+            SELECT DISTINCT o.*, u.name as user_name
+            FROM offer o
+            JOIN users u ON u.id = o.user_id
+            LEFT JOIN user_workspaces uw ON uw.workspace_id = o.workspace_id
+            WHERE EXISTS (
+                SELECT 1 FROM active_user
+                WHERE is_superuser = true
+            )
+            OR uw.user_id = (SELECT id FROM active_user)
+            ORDER BY o.created_at DESC
+        `;
 
-            // Set user context for RLS
-            await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
-
-            const offers: Offer[] = [];
-            const rows = await db.query<Offer>`
-                SELECT o.*, u.name as user_name
-                FROM offer o
-                JOIN users u ON u.id = o.user_id
-                JOIN user_workspaces uw ON uw.workspace_id = o.workspace_id
-                WHERE o.workspace_id = ${workspace_id}
-                AND (uw.user_id = ${userId} OR u.is_superuser)
-                ORDER BY o.created_at DESC
-            `;
-
-            for await (const row of rows) offers.push(row);
-            return { offers };
-        } catch (error) {
-            console.error("Error in list function:", error);
-            throw error;
+        for await (const row of rows) {
+            offers.push(row);
         }
+
+        return { offers };
     }
 );
 

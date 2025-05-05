@@ -1,7 +1,7 @@
 import { api, APIError } from "encore.dev/api";
 import LogtoClient from '@logto/node';
 import { LogtoConfig } from '@logto/node';
-import { db } from "./db";
+import { db } from "../db";
 
 // Logto configuration
 const logtoConfig: LogtoConfig = {

@@ -1,6 +1,6 @@
 import { api, APIError } from "encore.dev/api";
-import { verifyToken, checkWorkspaceContext } from "./auth";
-import { db } from "./db";
+import { verifyToken, checkWorkspaceContext } from "../Auth/auth";
+import { db } from "../db";
 
 
 interface Workspace {
@@ -232,36 +232,32 @@ export const removePlan = api(
 // List all plans
 export const listPlans = api(
   { expose: true, method: "GET", path: "/plan" },
-  async (): Promise<{ plans: Plan[] }> => {
+  async (): Promise<ListPlansResponse> => {
     await verifyAndSetUserContext();
 
-    try {
-      const workspace_id = await checkWorkspaceContext();
-      const userId = await verifyToken();
+    const plans: Plan[] = [];
+    const rows = await db.query<Plan>`
+      WITH active_user AS (
+        SELECT id, is_superuser 
+        FROM users 
+        WHERE id = current_setting('app.user_id', true)
+      )
+      SELECT DISTINCT p.id, p.name, p.workspace_id
+      FROM plan p
+      LEFT JOIN user_workspaces uw ON p.workspace_id = uw.workspace_id
+      WHERE EXISTS (
+        SELECT 1 FROM active_user
+        WHERE is_superuser = true
+      )
+      OR uw.user_id = (SELECT id FROM active_user)
+      ORDER BY p.name
+    `;
 
-      // Set user context for RLS
-      await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
-
-      const plans: Plan[] = [];
-      const rows = await db.query<Plan>`
-        SELECT p.*
-        FROM plan p
-        JOIN user_workspaces uw ON uw.workspace_id = p.workspace_id
-        WHERE p.workspace_id = ${workspace_id}
-        AND (uw.user_id = ${userId} OR EXISTS (
-          SELECT 1 FROM users u
-          WHERE u.id = ${userId}
-          AND u.is_superuser = true
-        ))
-        ORDER BY p.created_at DESC
-      `;
-
-      for await (const row of rows) plans.push(row);
-      return { plans };
-    } catch (error) {
-      console.error("Error in list function:", error);
-      throw error;
+    for await (const row of rows) {
+      plans.push(row);
     }
+
+    return { plans };
   }
 );
 

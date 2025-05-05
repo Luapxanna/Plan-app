@@ -1,6 +1,6 @@
 import { api, APIError } from "encore.dev/api";
-import { verifyToken, checkWorkspaceContext } from "./auth";
-import { db } from "./db";
+import { verifyToken, checkWorkspaceContext } from "../Auth/auth";
+import { db } from "../db";
 
 export type ApplicationStatus = 'pending' | 'reviewing' | 'approved' | 'rejected';
 
@@ -107,29 +107,25 @@ export const getApplication = api(
     async ({ id }: { id: string }): Promise<Application> => {
         await verifyAndSetUserContext();
 
-        try {
-            const workspace_id = await checkWorkspaceContext();
-            const userId = await verifyToken();
+        const application = await db.queryRow<Application>`
+            WITH active_user AS (
+                SELECT id, is_superuser 
+                FROM users 
+                WHERE id = current_setting('app.user_id', true)
+            )
+            SELECT a.*, u.name as user_name
+            FROM application a
+            JOIN users u ON u.id = a.user_id
+            LEFT JOIN user_workspaces uw ON uw.workspace_id = a.workspace_id
+            WHERE a.id = ${id}
+            AND (
+                EXISTS (SELECT 1 FROM active_user WHERE is_superuser = true)
+                OR uw.user_id = (SELECT id FROM active_user)
+            )
+        `;
 
-            // Set user context for RLS
-            await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
-
-            const application = await db.queryRow<Application>`
-                SELECT a.*, u.name as user_name
-                FROM application a
-                JOIN users u ON u.id = a.user_id
-                JOIN user_workspaces uw ON uw.workspace_id = a.workspace_id
-                WHERE a.id = ${id}
-                AND a.workspace_id = ${workspace_id}
-                AND (uw.user_id = ${userId} OR u.is_superuser)
-            `;
-
-            if (!application) throw APIError.notFound("Application not found or access denied");
-            return application;
-        } catch (error) {
-            console.error("Error in get function:", error);
-            throw error;
-        }
+        if (!application) throw APIError.notFound("Application not found or access denied");
+        return application;
     }
 );
 
@@ -139,30 +135,30 @@ export const listApplications = api(
     async (): Promise<{ applications: Application[] }> => {
         await verifyAndSetUserContext();
 
-        try {
-            const workspace_id = await checkWorkspaceContext();
-            const userId = await verifyToken();
+        const applications: Application[] = [];
+        const rows = await db.query<Application>`
+            WITH active_user AS (
+                SELECT id, is_superuser 
+                FROM users 
+                WHERE id = current_setting('app.user_id', true)
+            )
+            SELECT DISTINCT a.*, u.name as user_name
+            FROM application a
+            JOIN users u ON u.id = a.user_id
+            LEFT JOIN user_workspaces uw ON uw.workspace_id = a.workspace_id
+            WHERE EXISTS (
+                SELECT 1 FROM active_user
+                WHERE is_superuser = true
+            )
+            OR uw.user_id = (SELECT id FROM active_user)
+            ORDER BY a.created_at DESC
+        `;
 
-            // Set user context for RLS
-            await db.exec`SELECT set_config('app.user_id', ${userId}, false)`;
-
-            const applications: Application[] = [];
-            const rows = await db.query<Application>`
-                SELECT a.*, u.name as user_name
-                FROM application a
-                JOIN users u ON u.id = a.user_id
-                JOIN user_workspaces uw ON uw.workspace_id = a.workspace_id
-                WHERE a.workspace_id = ${workspace_id}
-                AND (uw.user_id = ${userId} OR u.is_superuser)
-                ORDER BY a.created_at DESC
-            `;
-
-            for await (const row of rows) applications.push(row);
-            return { applications };
-        } catch (error) {
-            console.error("Error in list function:", error);
-            throw error;
+        for await (const row of rows) {
+            applications.push(row);
         }
+
+        return { applications };
     }
 );
 

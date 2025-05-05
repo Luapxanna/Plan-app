@@ -1,6 +1,6 @@
 import { api, APIError } from "encore.dev/api";
-import { verifyToken, checkWorkspaceContext } from "./auth";
-import { db } from "./db";
+import { verifyToken, checkWorkspaceContext } from "../Auth/auth";
+import { db } from "../db";
 import { logQuoteEvent } from "./quote_analytic";
 
 export type QuoteStatus = 'draft' | 'sent' | 'viewed' | 'accepted' | 'rejected' | 'expired';
