@@ -1,12 +1,12 @@
 {
-  "name": "url-shortener",
+  "name": "plan-app",
   "private": true,
   "version": "0.0.1",
-  "description": "Encore URL Shortener Tutorial",
+  "description": "Plan App by Paul Le (Luapxanna)",
   "license": "MPL-2.0",
   "type": "module",
   "scripts": {
-    "test": "vitest"
+    "test": "echo \"No tests\""
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

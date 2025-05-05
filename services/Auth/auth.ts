@@ -47,15 +47,6 @@ interface User {
     is_superuser: boolean;
 }
 
-interface AuthResponse {
-    user: User;
-    workspace_id: string;
-}
-
-interface RedirectResponse {
-    redirect_url: string;
-}
-
 interface LogtoUserInfo {
     sub: string;
     email: string;
@@ -70,22 +61,6 @@ interface LogtoUserInfo {
 
 interface ListUsersResponse {
     users: User[];
-}
-
-interface LogtoUser {
-    id: string;
-    username?: string;
-    primaryEmail?: string;
-    name?: string;
-    avatar?: string;
-    customData?: {
-        is_superuser?: boolean;
-        [key: string]: unknown;
-    };
-}
-
-interface TokenResponse {
-    access_token: string;
 }
 
 interface Workspace {
