@@ -6,7 +6,7 @@
   "license": "MPL-2.0",
   "type": "module",
   "scripts": {
-    "test": "echo \"No tests\""
+    "test": "exit 0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
