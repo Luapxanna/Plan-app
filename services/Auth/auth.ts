@@ -96,6 +96,11 @@ interface Workspace {
     member_count: number;
 }
 
+interface LogtoTokenClaims {
+    permissions?: string[];
+    [key: string]: any;
+}
+
 // Login endpoint
 export const login = api(
     { method: "GET", path: "/auth/login", expose: true },
@@ -341,3 +346,28 @@ export async function checkWorkspaceContext(): Promise<string> {
 
     return result.workspace_id;
 }
+
+// Check if user has required permission using Logto
+export const requirePermission = async (permission: string): Promise<void> => {
+    try {
+        const logtoClient = createLogtoClient();
+        const userInfo = await logtoClient.getIdTokenClaims() as LogtoUserInfo;
+        if (!userInfo?.sub) throw APIError.unauthenticated("No active session");
+
+        const currentUser = await db.queryRow<User>`
+            SELECT * FROM users WHERE id = ${userInfo.sub}
+        `;
+        if (!currentUser) throw APIError.notFound("User not found");
+
+        // Superusers have all permissions
+        if (currentUser.is_superuser) return;
+
+        // Get user's permissions from Logto
+        const claims = await logtoClient.getAccessTokenClaims() as LogtoTokenClaims;
+        if (!claims?.permissions?.includes(permission)) {
+            throw APIError.permissionDenied(`Permission ${permission} required`);
+        }
+    } catch (error) {
+        throw error instanceof APIError ? error : APIError.permissionDenied("Permission check failed");
+    }
+};

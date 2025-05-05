@@ -1,11 +1,38 @@
 import { api, APIError } from "encore.dev/api";
 import { verifyToken, checkWorkspaceContext } from "../Auth/auth";
 import { db } from "../db";
-import { Topic } from "encore.dev/pubsub";
+import { Topic, Subscription } from "encore.dev/pubsub";
+import { requirePermission } from "../Auth/auth";
 
 // Define the event topic for new insights
 const NewInsight = new Topic<Insight>("insight-new", {
     deliveryGuarantee: "at-least-once",
+});
+
+// Subscribe to new insights
+export const NewInsightSubscription = new Subscription(NewInsight, "new-insight-handler", {
+    handler: async (event: Insight) => {
+        // Log the new insight event
+        console.log("New insight created:", {
+            id: event.id,
+            title: event.title,
+            workspace_id: event.workspace_id,
+            user_id: event.user_id
+        });
+
+        // Log the event in the audit log
+        await db.exec`
+            INSERT INTO audit_log (workspace_id, user_id, action, resource_type, resource_id, details)
+            VALUES (
+                ${event.workspace_id}::uuid,
+                ${event.user_id},
+                'create',
+                'insight',
+                ${event.id}::uuid,
+                jsonb_build_object('title', ${event.title})
+            )
+        `;
+    }
 });
 
 export interface Insight {
@@ -33,21 +60,39 @@ export const createInsight = api(
     async ({ title, content }: CreateInsightRequest): Promise<Insight> => {
         const userId = await verifyToken();
         const workspaceId = await checkWorkspaceContext();
+        await requirePermission("write:insight");
 
         const insight = await db.queryRow<Insight>`
-            INSERT INTO insight (title, content, workspace_id, user_id)
-            VALUES (
-                ${title},
-                ${content},
-                ${workspaceId}::uuid,
-                ${userId}::uuid
+            WITH active_user AS (
+                SELECT id, is_superuser 
+                FROM users 
+                WHERE id = current_setting('app.user_id', true)
             )
+            INSERT INTO insight (title, content, workspace_id, user_id)
+            SELECT 
+                ${title}::text,
+                ${content}::text,
+                ${workspaceId}::uuid,
+                (SELECT id FROM active_user)
             RETURNING id, workspace_id, user_id, title, content, created_at, updated_at
         `;
 
         if (!insight) {
             throw APIError.internal("Failed to create insight");
         }
+
+        // Log audit
+        await db.exec`
+            INSERT INTO audit_log (workspace_id, user_id, action, resource_type, resource_id, details)
+            VALUES (
+                ${workspaceId}::uuid,
+                ${userId}::text,
+                'create',
+                'insight',
+                ${insight.id}::uuid,
+                jsonb_build_object('title', ${title}::text)
+            )
+        `;
 
         // Publish the new insight event
         await NewInsight.publish(insight);
@@ -62,13 +107,14 @@ export const listInsights = api(
     async (): Promise<ListInsightsResponse> => {
         const userId = await verifyToken();
         const workspaceId = await checkWorkspaceContext();
+        await requirePermission("read:insight");
 
         const insights: Insight[] = [];
         const rows = await db.query<Insight>`
             WITH active_user AS (
                 SELECT id, is_superuser 
                 FROM users 
-                WHERE id = ${userId}::uuid
+                WHERE id = current_setting('app.user_id', true)
             )
             SELECT DISTINCT i.*
             FROM insight i
@@ -76,7 +122,7 @@ export const listInsights = api(
             WHERE i.workspace_id = ${workspaceId}::uuid
             AND (
                 EXISTS (SELECT 1 FROM active_user WHERE is_superuser = true)
-                OR uw.user_id = ${userId}::uuid
+                OR uw.user_id = (SELECT id FROM active_user)
             )
             ORDER BY i.created_at DESC
         `;
@@ -85,19 +131,18 @@ export const listInsights = api(
             insights.push(row);
         }
 
+        // Log audit
+        await db.exec`
+            INSERT INTO audit_log (workspace_id, user_id, action, resource_type, details)
+            VALUES (
+                ${workspaceId}::uuid,
+                ${userId}::text,
+                'list',
+                'insight',
+                jsonb_build_object('count', ${insights.length}::integer)
+            )
+        `;
+
         return { insights };
-    }
-);
-
-export const handleNewInsight = api(
-    { expose: true, method: "POST", path: "/insight/new" },
-    async (event: Insight): Promise<void> => {
-        console.log("New insight created:", {
-            id: event.id,
-            title: event.title,
-            workspace_id: event.workspace_id,
-            user_id: event.user_id
-        });
-
     }
 ); 
