@@ -25,11 +25,11 @@ export const NewInsightSubscription = new Subscription(NewInsight, "new-insight-
             INSERT INTO audit_log (workspace_id, user_id, action, resource_type, resource_id, details)
             VALUES (
                 ${event.workspace_id}::uuid,
-                ${event.user_id},
-                'create',
-                'insight',
+                ${event.user_id}::text,
+                'create'::text,
+                'insight'::text,
                 ${event.id}::uuid,
-                jsonb_build_object('title', ${event.title})
+                jsonb_build_object('title', ${event.title}::text)
             )
         `;
     }
