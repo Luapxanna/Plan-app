@@ -237,8 +237,6 @@ The application uses Encore's pub/sub system for real-time event handling:
   - Delivery guarantee: "at-least-once"
   - Triggers audit logging
 
-### Development & Testing
-- `POST /test-data` - Insert test data (development only)
 
 ## Running the Application
 
