@@ -12,6 +12,20 @@ const NewInsight = new Topic<Insight>("insight-new", {
 // Subscribe to new insights
 export const NewInsightSubscription = new Subscription(NewInsight, "new-insight-handler", {
     handler: async (event: Insight) => {
+        // Check if this insight was already processed
+        const existing = await db.queryRow<{ id: string }>`
+            SELECT id FROM audit_log 
+            WHERE resource_type = 'insight' 
+            AND resource_id = ${event.id}::uuid
+            AND action = 'create'
+            LIMIT 1
+        `;
+
+        if (existing) {
+            console.log("Insight already processed:", event.id);
+            return;
+        }
+
         // Log the new insight event
         console.log("New insight created:", {
             id: event.id,
@@ -144,5 +158,53 @@ export const listInsights = api(
         `;
 
         return { insights };
+    }
+);
+
+interface AuditLog {
+    id: string;
+    workspace_id: string;
+    user_id: string;
+    action: string;
+    resource_type: string;
+    resource_id: string | null;
+    details: any;
+    created_at: Date;
+}
+
+interface ListAuditLogResponse {
+    logs: AuditLog[];
+}
+
+// List audit logs
+export const listAuditLog = api(
+    { expose: true, method: "GET", path: "/audit-log" },
+    async (): Promise<ListAuditLogResponse> => {
+        const userId = await verifyToken();
+        const workspaceId = await checkWorkspaceContext();
+        await requirePermission("read:insight");
+
+        const logs: AuditLog[] = [];
+        const rows = await db.query<AuditLog>`
+            WITH active_user AS (
+                SELECT id, is_superuser 
+                FROM users 
+                WHERE id = current_setting('app.user_id', true)
+            )
+            SELECT al.*
+            FROM audit_log al
+            WHERE al.workspace_id = ${workspaceId}::uuid
+            AND (
+                EXISTS (SELECT 1 FROM active_user WHERE is_superuser = true)
+                OR al.user_id = (SELECT id FROM active_user)
+            )
+            ORDER BY al.created_at DESC
+        `;
+
+        for await (const row of rows) {
+            logs.push(row);
+        }
+
+        return { logs };
     }
 ); 
