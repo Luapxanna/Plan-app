@@ -2,6 +2,13 @@ import { api, APIError } from "encore.dev/api";
 import LogtoClient from '@logto/node';
 import { LogtoConfig } from '@logto/node';
 import { db } from "../db";
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { fileURLToPath } from 'url';
+
+// Get the directory path for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Logto configuration
 const logtoConfig: LogtoConfig = {
@@ -346,3 +353,105 @@ export const requirePermission = async (permission: string): Promise<void> => {
         throw error instanceof APIError ? error : APIError.permissionDenied("Permission check failed");
     }
 };
+
+// GDPR/CCPA Export API
+export const exportUserData = api(
+    { expose: true, method: "GET", path: "/auth/export" },
+    async (): Promise<{ downloadUrl: string }> => {
+        const userId = await verifyToken();
+        if (!userId) {
+            throw APIError.unauthenticated("User ID is invalid or missing");
+        }
+
+        // Fetch user data
+        const user = await db.queryRow<any>`SELECT * FROM users WHERE id = ${userId}`;
+        if (!user) throw APIError.notFound("User not found");
+
+        let workspaces, leads, applications, offers, auditLogs;
+        try {
+            workspaces = await db.query<any>`SELECT * FROM user_workspaces WHERE user_id = ${userId}`;
+            leads = await db.query<any>`SELECT * FROM lead WHERE user_id = ${userId}`;
+            applications = await db.query<any>`SELECT * FROM application WHERE user_id = ${userId}`;
+            offers = await db.query<any>`SELECT * FROM offer WHERE user_id = ${userId}`;
+            auditLogs = await db.query<any>`SELECT * FROM audit_log WHERE user_id = ${userId}`;
+        } catch (error) {
+            console.error("Error fetching user data:", error);
+            throw APIError.internal("Failed to fetch user data");
+        }
+
+        // Combine all data
+        interface ExportData {
+            user: any;
+            workspaces: any[];
+            leads: any[];
+            applications: any[];
+            offers: any[];
+            auditLogs: any[];
+            exportDate: string;
+            exportType: string;
+        }
+
+        const exportData: ExportData = {
+            user,
+            workspaces: [],
+            leads: [],
+            applications: [],
+            offers: [],
+            auditLogs: [],
+            exportDate: new Date().toISOString(),
+            exportType: 'GDPR/CCPA Data Export'
+        };
+
+        // Collect all results from async generators
+        for await (const workspace of workspaces) {
+            exportData.workspaces.push(workspace);
+        }
+        for await (const lead of leads) {
+            exportData.leads.push(lead);
+        }
+        for await (const application of applications) {
+            exportData.applications.push(application);
+        }
+        for await (const offer of offers) {
+            exportData.offers.push(offer);
+        }
+        for await (const log of auditLogs) {
+            exportData.auditLogs.push(log);
+        }
+
+        // Generate JSON file
+        const fileName = `user_data_${userId}_${Date.now()}.json`;
+        const exportDir = path.join(__dirname, '../../exports');
+        const filePath = path.join(exportDir, fileName);
+
+        try {
+            // Create exports directory if it doesn't exist
+            await fs.mkdir(exportDir, { recursive: true });
+            
+            // Write the JSON file
+            await fs.writeFile(
+                filePath, 
+                JSON.stringify(exportData, null, 2), 
+                'utf-8'
+            );
+
+            // Generate download URL
+            const downloadUrl = `${process.env.API_URL || 'http://localhost:4000'}/exports/${fileName}`;
+            
+            // Schedule file cleanup after 24 hours
+            setTimeout(async () => {
+                try {
+                    await fs.unlink(filePath);
+                    console.log(`Cleaned up export file: ${fileName}`);
+                } catch (err) {
+                    console.error(`Failed to clean up export file: ${fileName}`, err);
+                }
+            }, 24 * 60 * 60 * 1000);
+
+            return { downloadUrl };
+        } catch (error) {
+            console.error("Error generating export file:", error);
+            throw APIError.internal("Failed to generate export file");
+        }
+    }
+);
